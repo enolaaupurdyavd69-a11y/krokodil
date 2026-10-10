@@ -1,12 +1,13 @@
 'use strict';
 (() => {
   // При изменении слов или кода — увеличить, чтобы Telegram не отдавал старое из кеша
-  const VER = '1';
+  const VER = '2';
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45'];
   const NAMES = ['Огненные лисы', 'Трезвые не будем', 'Третьи лишние', 'Ночные совы', 'Без тормозов', 'Шестое чувство'];
   const TIMES = [30, 60, 90, 120];
   const TARGETS = [10, 20, 30, 50, 75, 100];
   const DIFFS = [[0, 'Все'], [1, 'Лёгкие'], [2, 'Средние'], [3, 'Сложные']];
+  const MODES = { croc: 'Крокодил', tabu: 'Табу' };
   const RING = 2 * Math.PI * 44;
 
   const tg = window.Telegram && window.Telegram.WebApp;
@@ -21,59 +22,62 @@
   const app = document.getElementById('app');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  let CATS = [];
+  const DECKS = { croc: [], tabu: [] };
   let settings = Object.assign({
-    teams: [NAMES[0], NAMES[1]], time: 60, target: 30, cats: null, diff: 0,
-    penalty: true, lastWord: true, sound: true,
+    teams: [NAMES[0], NAMES[1]], time: 60, target: 30, cats: {}, diff: 0,
+    penalty: true, lastWord: true, sound: true, mode: 'croc',
   }, store.get('settings', {}));
+  if (Array.isArray(settings.cats) || !settings.cats) settings.cats = { croc: settings.cats || null }; // версия 1 хранила массив
   let custom = store.get('custom', []);
   let game = store.get('game', null);
+  if (game && !game.mode) game.mode = 'croc';
   let screen = 'loading';
   let setupError = '';
   let timer = null, lastBeep = -1, lastSaved = -1, audio = null, wakeLock = null;
 
   // ---------- слова ----------
   async function loadWords() {
-    const idx = await (await fetch(`words/index.json?v=${VER}`)).json();
-    CATS = await Promise.all(idx.map(async c => ({
-      id: c.id, name: c.name,
-      words: await (await fetch(`words/${c.id}.json?v=${VER}`)).json(),
-    })));
+    const json = async url => (await fetch(`${url}?v=${VER}`)).json();
+    const idx = await json('words/index.json');
+    const load = dir => Promise.all(idx.map(async c => ({ id: c.id, name: c.name, words: await json(`words/${dir}${c.id}.json`) })));
+    [DECKS.croc, DECKS.tabu] = await Promise.all([load(''), load('tabu/')]);
   }
-  function allCats() {
-    return custom.length ? CATS.concat({ id: 'custom', name: 'Свои слова', words: custom.map(t => ({ t, d: 2 })) }) : CATS;
+  function allCats(mode) {
+    if (mode === 'croc' && custom.length) return DECKS.croc.concat({ id: 'custom', name: 'Свои слова', words: custom.map(t => ({ t, d: 2 })) });
+    return DECKS[mode];
   }
-  function selectedCats() {
-    const ids = allCats().map(c => c.id);
-    return settings.cats ? settings.cats.filter(id => ids.includes(id)) : ids;
+  function selectedCats(mode) {
+    const ids = allCats(mode).map(c => c.id);
+    const saved = settings.cats[mode];
+    return saved ? saved.filter(id => ids.includes(id)) : ids;
   }
-  function pool(cats, diff, used) {
+  function pool(mode, cats, diff, used) {
     const out = [];
-    for (const c of allCats()) {
+    for (const c of allCats(mode)) {
       if (!cats.includes(c.id)) continue;
       for (const w of c.words) {
         const k = c.id + '|' + w.t;
-        if ((!diff || w.d === diff) && !(used && used.includes(k))) out.push({ t: w.t, c: c.name, k });
+        if ((!diff || w.d === diff) && !(used && used.includes(k))) out.push({ t: w.t, x: w.x, c: c.name, k });
       }
     }
     return out;
   }
   function nextWord() {
-    let p = pool(game.cats, game.diff, game.used);
-    if (!p.length) { game.used = []; p = pool(game.cats, game.diff, null); }
+    let p = pool(game.mode, game.cats, game.diff, game.used);
+    if (!p.length) { game.used = []; p = pool(game.mode, game.cats, game.diff, null); }
     if (!p.length) { game.word = null; return; }
     const w = p[Math.floor(Math.random() * p.length)];
     game.used.push(w.k);
-    game.word = { t: w.t, c: w.c };
+    game.word = { t: w.t, c: w.c, x: w.x || null };
     game.shownAt = Date.now();
   }
 
   // ---------- звук, вибрация, экран ----------
-  function beep(freq, dur) {
+  function beep(freq, dur, type) {
     if (!settings.sound || !audio) return;
     try {
       const o = audio.createOscillator(), g = audio.createGain();
-      o.frequency.value = freq; o.type = 'sine';
+      o.frequency.value = freq; o.type = type || 'sine';
       g.gain.setValueAtTime(.18, audio.currentTime);
       g.gain.exponentialRampToValueAtTime(.001, audio.currentTime + dur);
       o.connect(g).connect(audio.destination);
@@ -88,7 +92,7 @@
         return;
       }
     } catch { /* старый клиент */ }
-    try { navigator.vibrate && navigator.vibrate(kind === 'success' ? 40 : kind === 'warning' ? [80, 60, 80] : 15); } catch { /* нет вибро */ }
+    try { navigator.vibrate && navigator.vibrate(kind === 'success' ? 40 : kind === 'warning' || kind === 'error' ? [80, 60, 80] : 15); } catch { /* нет вибро */ }
   }
   async function keepAwake(on) {
     try {
@@ -108,11 +112,13 @@
   }
 
   function newGame() {
-    const cats = selectedCats();
+    const mode = settings.mode;
+    const cats = selectedCats(mode);
     if (!cats.length) { setupError = 'Выберите хотя бы одну категорию.'; return render(); }
-    if (!pool(cats, settings.diff, null).length) { setupError = 'В выбранных категориях нет слов такой сложности.'; return render(); }
+    if (!pool(mode, cats, settings.diff, null).length) { setupError = 'В выбранных категориях нет слов такой сложности.'; return render(); }
     setupError = '';
     game = {
+      mode,
       teams: settings.teams.map((n, i) => ({ name: n.trim() || `Команда ${i + 1}`, color: COLORS[i], score: 0 })),
       cats, diff: settings.diff, time: settings.time, target: settings.target,
       penalty: settings.penalty, lastWord: settings.lastWord,
@@ -170,26 +176,33 @@
     beep(330, .6); haptic('warning');
     go(game.lastWord && game.word ? 'last' : 'review');
   }
-  function mark(ok) {
+  // r: 'hit' — угадано, 'skip' — пропуск, 'foul' — нарушение в Табу
+  function mark(r) {
     if (!game.word || game.paused) return;
-    game.log.push({ t: game.word.t, ok, ms: Date.now() - game.shownAt });
-    if (ok) { haptic('success'); beep(660, .09); } else haptic('soft');
+    game.log.push({ t: game.word.t, r, ms: Date.now() - game.shownAt });
+    if (r === 'hit') { haptic('success'); beep(660, .09); }
+    else if (r === 'foul') { haptic('error'); beep(150, .35, 'sawtooth'); }
+    else haptic('soft');
     nextWord();
     save();
     if (!game.word) return timeUp();
     render();
   }
 
+  function counts() {
+    const c = { hit: 0, skip: 0, foul: 0 };
+    for (const x of game.log) c[x.r]++;
+    return c;
+  }
   function turnPoints() {
-    const hits = game.log.filter(x => x.ok).length;
-    const skips = game.log.length - hits;
-    return hits - (game.penalty ? skips : 0) + (game.lastTeam === game.turn ? 1 : 0);
+    const c = counts();
+    return c.hit - (game.penalty ? c.skip : 0) - c.foul + (game.lastTeam === game.turn ? 1 : 0);
   }
   function applyTurn() {
     const team = game.teams[game.turn];
     team.score = Math.max(0, team.score + turnPoints());
     if (game.lastTeam !== null && game.lastTeam >= 0 && game.lastTeam !== game.turn) game.teams[game.lastTeam].score++;
-    for (const x of game.log) if (x.ok && (!game.best || x.ms < game.best.ms)) game.best = { t: x.t, ms: x.ms, team: team.name };
+    for (const x of game.log) if (x.r === 'hit' && (!game.best || x.ms < game.best.ms)) game.best = { t: x.t, ms: x.ms, team: team.name };
     game.turns++;
     game.turn = (game.turn + 1) % game.teams.length;
     // победа проверяется только после полного круга, чтобы у всех было поровну ходов
@@ -212,14 +225,16 @@
 
   // ---------- экраны ----------
   const CROC = `<svg class="croc" viewBox="0 0 100 100" aria-hidden="true"><path d="M8 62c10-20 30-28 52-26l24-10c6-2 10 4 6 8l-8 6 6 2c4 1 4 7 0 8l-26 6c-12 14-34 18-54 6z" fill="#3ddc97"/><circle cx="58" cy="44" r="5" fill="#140f1f"/><circle cx="59" cy="43" r="1.6" fill="#fff"/><path d="M46 66l4 6 4-6 4 6 4-6" stroke="#140f1f" stroke-width="3" fill="none" stroke-linejoin="round"/></svg>`;
+  const TITLE = `Крокодил <i>и</i> Табу <span>18+</span>`;
+  const MARKS = { hit: ['y', '✓'], skip: ['n', '✕'], foul: ['f', '!'] };
 
   const views = {
     loading: () => `<p class="loading">Загрузка…</p>`,
     failed: () => `<div class="hero"><h2>Не удалось загрузить слова</h2><p class="muted">Проверьте интернет и откройте игру ещё раз.</p><button class="btn" data-act="reload">Повторить</button></div>`,
 
     age: () => `
-      <div class="hero">${CROC}<h1>Крокодил <span>18+</span></h1>
-        <p class="muted">В игре есть пикантные слова, шутки про алкоголь и отношения. Без откровенного контента, но для взрослой компании.</p></div>
+      <div class="hero">${CROC}<h1>${TITLE}</h1>
+        <p class="muted">В играх есть пикантные слова, шутки про алкоголь и отношения. Без откровенного контента, но для взрослой компании.</p></div>
       <div class="stack spacer">
         <button class="btn" data-act="adult">Мне есть 18 лет</button>
         <button class="link" data-act="minor">Мне нет 18</button>
@@ -229,32 +244,41 @@
     home: () => {
       const canResume = game && game.phase && game.phase !== 'win';
       return `
-      <div class="hero">${CROC}<h1>Крокодил <span>18+</span></h1>
-        <p class="muted">Покажи слово без звуков и слов. Твоя команда угадывает, пока идёт таймер.</p></div>
+      <div class="hero">${CROC}<h1>${TITLE}</h1>
+        <p class="muted">Две игры для компании и одного телефона. Команды угадывают слова, пока идёт таймер.</p></div>
       <div class="stack spacer">
-        ${canResume ? `<button class="btn ok" data-act="resume">Продолжить игру · ход ${game.turns + 1}</button>` : ''}
-        <button class="btn" data-act="setup">Новая игра</button>
+        ${canResume ? `<button class="btn ok" data-act="resume">Продолжить: ${MODES[game.mode]} · ход ${game.turns + 1}</button>` : ''}
+        <button class="mode-card" data-act="setup" data-mode="croc"><b>Крокодил</b><span>Показывай слово жестами, без звуков</span></button>
+        <button class="mode-card tabu" data-act="setup" data-mode="tabu"><b>Табу</b><span>Объясняй словами, но без 5 запретных</span></button>
         <button class="btn alt" data-act="rules">Правила</button>
-        <button class="btn alt" data-act="custom">Свои слова${custom.length ? ` · ${custom.length}` : ''}</button>
+        <button class="btn alt" data-act="custom">Свои слова для Крокодила${custom.length ? ` · ${custom.length}` : ''}</button>
       </div>`;
     },
 
     rules: () => `
       <h2>Правила</h2>
-      <div class="rules card"><ol>
+      <div class="rules card"><div class="eyebrow">Общее</div><ol>
         <li>Разбейтесь на команды от 2 человек. Телефон один на всех.</li>
-        <li>Команды ходят по очереди. Один игрок показывает слово, его команда угадывает.</li>
-        <li>Показывать можно жестами и мимикой. Нельзя говорить, издавать звуки, показывать буквы и тыкать в предметы вокруг.</li>
+        <li>Команды ходят по очереди. Один игрок объясняет слово, его команда угадывает, пока идёт таймер.</li>
         <li>Угадали — свайп вправо или «Угадано», +1. Не выходит — свайп влево или «Пропуск». Со штрафом пропуск стоит −1.</li>
         <li>«Последнее слово»: когда время вышло, текущее слово может угадать любая команда, очко получает она.</li>
         <li>После хода спорные слова можно исправить. Побеждает команда, набравшая нужные очки по итогам полного круга.</li>
-        <li>Пить за пропуски необязательно. Но кто мы такие, чтобы вас останавливать.</li>
       </ol></div>
+      <div class="rules card"><div class="eyebrow">Крокодил</div><ol>
+        <li>Показывать можно только жестами и мимикой.</li>
+        <li>Нельзя говорить, издавать звуки, показывать буквы и тыкать в предметы вокруг.</li>
+      </ol></div>
+      <div class="rules card"><div class="eyebrow">Табу</div><ol>
+        <li>Объясняй словами, но нельзя называть само слово, однокоренные слова и 5 запретных слов с карточки.</li>
+        <li>Нельзя жесты, «звучит как…», переводы на другие языки и первые буквы.</li>
+        <li>Соперник садится рядом и следит за карточкой. Сказал запретное — жмите «Нарушение», это −1 и слово уходит.</li>
+      </ol></div>
+      <p class="muted small">Пить за пропуски необязательно. Но кто мы такие, чтобы вас останавливать.</p>
       <button class="btn alt spacer" data-act="home">Назад</button>`,
 
     custom: () => `
       <h2>Свои слова</h2>
-      <p class="muted small">По одному слову или фразе на строку. Появятся как категория «Свои слова». Хранятся только на этом телефоне.</p>
+      <p class="muted small">Для Крокодила. По одному слову или фразе на строку. Появятся как категория «Свои слова». Хранятся только на этом телефоне.</p>
       <textarea id="customText" placeholder="Директор на корпоративе&#10;Кот Васька в отпуске">${esc(custom.join('\n'))}</textarea>
       <div class="stack spacer">
         <button class="btn" data-act="saveCustom">Сохранить</button>
@@ -262,9 +286,10 @@
       </div>`,
 
     setup: () => {
-      const sel = selectedCats();
+      const mode = settings.mode;
+      const sel = selectedCats(mode);
       return `
-      <h2>Новая игра</h2>
+      <div class="stack"><div class="eyebrow">Новая игра</div><h2>${MODES[mode]}</h2></div>
       <div class="stack">
         <div class="eyebrow">Команды</div>
         ${settings.teams.map((n, i) => `
@@ -279,7 +304,7 @@
       <div class="stack"><div class="eyebrow">Очки до победы</div>
         <div class="seg">${TARGETS.map(t => `<button class="${t === settings.target ? 'on' : ''}" data-act="target" data-v="${t}">${t}</button>`).join('')}</div></div>
       <div class="stack"><div class="eyebrow">Категории</div>
-        <div class="chips">${allCats().map(c => `<button class="chip ${sel.includes(c.id) ? 'on' : ''}" data-act="cat" data-id="${c.id}">${esc(c.name)}<small>${c.words.length}</small></button>`).join('')}</div></div>
+        <div class="chips">${allCats(mode).map(c => `<button class="chip ${sel.includes(c.id) ? 'on' : ''}" data-act="cat" data-id="${c.id}">${esc(c.name)}<small>${c.words.length}</small></button>`).join('')}</div></div>
       <div class="stack"><div class="eyebrow">Сложность слов</div>
         <div class="seg">${DIFFS.map(([v, n]) => `<button class="${v === settings.diff ? 'on' : ''}" data-act="diff" data-v="${v}">${n}</button>`).join('')}</div></div>
       <div class="stack">
@@ -296,12 +321,15 @@
 
     ready: () => {
       const t = game.teams[game.turn];
+      const how = game.mode === 'tabu'
+        ? 'Один игрок объясняет словами, его команда угадывает. Соперник садится рядом и следит за запретными словами.'
+        : 'Один игрок показывает жестами, остальные из команды угадывают. Экран видит только показывающий.';
       return `
       <div class="hero center" style="margin-top:14vh">
-        <div class="eyebrow">Раунд ${game.round} · передайте телефон</div>
+        <div class="eyebrow">${MODES[game.mode]} · раунд ${game.round} · передайте телефон</div>
         <div class="big-team" style="color:${t.color}">${esc(t.name)}</div>
-        <p class="muted">Один игрок показывает, остальные из команды угадывают. Экран видит только показывающий.</p>
-        <p class="muted small">${game.time} секунд${game.penalty ? ' · пропуск −1' : ''}</p>
+        <p class="muted">${how}</p>
+        <p class="muted small">${game.time} секунд${game.penalty ? ' · пропуск −1' : ''}${game.mode === 'tabu' ? ' · нарушение −1' : ''}</p>
       </div>
       <div class="stack spacer">
         <button class="btn" data-act="go">Я готов, поехали</button>
@@ -311,10 +339,12 @@
 
     turn: () => {
       const t = game.teams[game.turn];
-      const hits = game.log.filter(x => x.ok).length;
+      const hits = counts().hit;
       const s = Math.ceil(game.left / 1000);
+      const w = game.word || { t: '', c: '', x: null };
+      const tabu = game.mode === 'tabu';
       return `
-      <div class="turn">
+      <div class="turn ${tabu ? 'is-tabu' : ''}">
         <div class="turn-top">
           <span><span class="dot" style="background:${t.color};margin-right:8px"></span>${esc(t.name)}</span>
           <span style="display:flex;gap:8px;align-items:center"><span class="pill">Угадано: ${hits}</span><button class="pause-btn" data-act="pause" aria-label="Пауза">❚❚</button></span>
@@ -322,7 +352,11 @@
         <div class="timer"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="var(--raise)" stroke-width="8"/>
           <circle id="ring" cx="50" cy="50" r="44" fill="none" stroke="var(--pink)" stroke-width="8" stroke-linecap="round" stroke-dasharray="${RING}" stroke-dashoffset="${RING * (1 - game.left / (game.time * 1000))}"/></svg>
           <div class="t" id="sec">${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}</div></div>
-        <div class="word-card" id="card"><div><div class="word">${esc(game.word ? game.word.t : '')}</div><div class="cat">${esc(game.word ? game.word.c : '')}</div></div></div>
+        <div class="word-card" id="card"><div>
+          <div class="word">${esc(w.t)}</div><div class="cat">${esc(w.c)}</div>
+          ${tabu && w.x ? `<div class="taboo"><div class="eyebrow">Нельзя говорить</div><ul>${w.x.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+        </div></div>
+        ${tabu ? `<button class="foul" data-act="foul">Нарушение −1</button>` : ''}
         <div class="actions"><button class="skip" data-act="skip">Пропуск</button><button class="hit" data-act="hit">Угадано</button></div>
         <div class="hint">или свайп по карточке: вправо угадано, влево пропуск</div>
       </div>
@@ -348,13 +382,14 @@
 
     review: () => {
       const pts = turnPoints();
+      const c = counts();
       const other = game.lastTeam !== null && game.lastTeam >= 0 && game.lastTeam !== game.turn ? game.teams[game.lastTeam] : null;
       return `
       <div class="center stack"><div class="eyebrow">Итог хода · ${esc(game.teams[game.turn].name)}</div>
         <div class="total ${pts >= 0 ? 'plus' : 'minus'}">${pts > 0 ? '+' : ''}${pts}</div>
-        <p class="muted small">Нажмите на слово, чтобы исправить спорное</p></div>
+        <p class="muted small">Угадано ${c.hit} · пропусков ${c.skip}${game.mode === 'tabu' ? ` · нарушений ${c.foul}` : ''}<br>Нажмите на слово, чтобы исправить спорное</p></div>
       <div class="list">
-        ${game.log.map((x, i) => `<button class="row" data-act="toggle" data-i="${i}"><span class="w">${esc(x.t)}</span><span class="mark ${x.ok ? 'y' : 'n'}">${x.ok ? '✓' : '✕'}</span></button>`).join('') || '<p class="muted center">Ни одного слова за ход</p>'}
+        ${game.log.map((x, i) => `<button class="row" data-act="toggle" data-i="${i}"><span class="w">${esc(x.t)}</span><span class="mark ${MARKS[x.r][0]}">${MARKS[x.r][1]}</span></button>`).join('') || '<p class="muted center">Ни одного слова за ход</p>'}
         ${game.lastTeam !== null && game.lastTeam >= 0 ? `<div class="row"><span class="w">Последнее слово: ${esc(game.word.t)}</span><span class="muted small">${esc(game.teams[game.lastTeam].name)} +1</span></div>` : ''}
       </div>
       ${other ? `<p class="muted small center">${esc(other.name)} получает +1 за последнее слово</p>` : ''}
@@ -366,7 +401,7 @@
       const top = Math.max(...game.teams.map(t => t.score));
       const tie = game.turn === 0 && top >= game.target;
       return `
-      <div class="stack"><div class="eyebrow">Раунд ${game.round} · играем до ${game.target}</div><h2>Счёт</h2></div>
+      <div class="stack"><div class="eyebrow">${MODES[game.mode]} · раунд ${game.round} · играем до ${game.target}</div><h2>Счёт</h2></div>
       ${tie ? `<p class="card small">Ничья на первом месте. Играем ещё круг.</p>` : ''}
       <div class="bars">${game.teams.map((t, i) => `
         <div class="bar ${i === game.turn ? 'next' : ''}"><div class="lab"><span>${esc(t.name)}</span><b>${t.score}</b></div>
@@ -383,7 +418,7 @@
       const max = Math.max(1, ...game.teams.map(t => t.score));
       return `
       <div class="hero center" style="margin-top:6vh">
-        <div class="eyebrow">Победа</div>
+        <div class="eyebrow">${MODES[game.mode]} · победа</div>
         <div class="big-team winner">${esc(w.name)}</div>
         <p class="muted">${w.score} очков · раундов: ${game.round}</p>
       </div>
@@ -410,6 +445,7 @@
   }
 
   // ---------- действия ----------
+  const NEXT_MARK = { croc: { hit: 'skip', skip: 'hit' }, tabu: { hit: 'skip', skip: 'foul', foul: 'hit' } };
   const actions = {
     reload: () => location.reload(),
     adult: () => { store.set('adult', true); go('home'); },
@@ -417,7 +453,7 @@
     home: () => { if (screen === 'turn') pause(); stop(); keepAwake(false); go('home'); },
     rules: () => go('rules'),
     custom: () => go('custom'),
-    setup: () => { setupError = ''; go('setup'); },
+    setup: el => { settings.mode = el.dataset.mode || settings.mode; saveSettings(); setupError = ''; go('setup'); },
     saveCustom: () => {
       const seen = new Set();
       custom = document.getElementById('customText').value.split('\n').map(s => s.trim()).filter(s => s && !seen.has(s) && seen.add(s));
@@ -436,8 +472,8 @@
     diff: el => { settings.diff = +el.dataset.v; saveSettings(); render(); },
     flag: el => { settings[el.dataset.key] = !settings[el.dataset.key]; saveSettings(); render(); },
     cat: el => {
-      const sel = selectedCats(), id = el.dataset.id;
-      settings.cats = sel.includes(id) ? sel.filter(x => x !== id) : sel.concat(id);
+      const mode = settings.mode, sel = selectedCats(mode), id = el.dataset.id;
+      settings.cats[mode] = sel.includes(id) ? sel.filter(x => x !== id) : sel.concat(id);
       saveSettings(); render();
     },
     start: newGame,
@@ -445,13 +481,14 @@
     pause,
     unpause: () => { game.paused = false; render(); run(); },
     endTurn: () => { stop(); keepAwake(false); go('review'); },
-    hit: () => mark(true),
-    skip: () => mark(false),
+    hit: () => mark('hit'),
+    skip: () => mark('skip'),
+    foul: () => mark('foul'),
     lastBy: el => { game.lastTeam = +el.dataset.i; go('review'); },
-    toggle: el => { const x = game.log[+el.dataset.i]; x.ok = !x.ok; save(); render(); },
+    toggle: el => { const x = game.log[+el.dataset.i]; x.r = NEXT_MARK[game.mode][x.r] || 'hit'; save(); render(); },
     apply: applyTurn,
     next: () => go('ready'),
-    again: () => { settings.teams = game.teams.map(t => t.name); saveSettings(); newGame(); },
+    again: () => { settings.teams = game.teams.map(t => t.name); settings.mode = game.mode; saveSettings(); newGame(); },
     menuEnd: () => { game = null; store.del('game'); go('home'); },
   };
 
@@ -481,7 +518,7 @@
       if (x0 === null) return;
       const dx = e.clientX - x0; x0 = null;
       card.style.transition = 'transform .15s'; card.style.transform = ''; card.style.borderColor = '';
-      if (dx > 70) mark(true); else if (dx < -70) mark(false);
+      if (dx > 70) mark('hit'); else if (dx < -70) mark('skip');
     };
     card.addEventListener('pointerup', end);
     card.addEventListener('pointercancel', end);
@@ -529,6 +566,8 @@
   // ---------- старт ----------
   render();
   loadWords().then(() => {
+    // партия из версии 1 хранила ok: true/false вместо r
+    if (game && game.log) for (const x of game.log) if (!x.r) x.r = x.ok ? 'hit' : 'skip';
     screen = store.get('adult', false) ? 'home' : 'age';
     render();
   }).catch(() => { screen = 'failed'; render(); });
