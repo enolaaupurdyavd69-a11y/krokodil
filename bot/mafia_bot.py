@@ -7,6 +7,7 @@
 """
 import base64
 import html
+import random
 import io
 import json
 import sqlite3
@@ -141,7 +142,14 @@ def kb(rows):
 REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 
+def is_bot(uid):
+    """Виртуальные игроки — id вида «b1», им ничего не отправляем."""
+    return str(uid).startswith("b")
+
+
 def send(chat, text, rows=None, markup=None):
+    if is_bot(chat):
+        return {"message_id": 0}
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
     if rows or markup:
         p["reply_markup"] = markup or kb(rows)
@@ -150,6 +158,8 @@ def send(chat, text, rows=None, markup=None):
 
 def send_photo(chat, make, caption, rows=None, markup=None):
     """Картинка с подписью. make() рисует PNG; не вышло — отправляем ту же подпись текстом."""
+    if is_bot(chat):
+        return {"message_id": 0}
     data = None
     if C:
         try:
@@ -187,6 +197,8 @@ ALL_PERMS = ["can_send_messages", "can_send_audios", "can_send_documents", "can_
 
 
 def set_muted(g, uid, muted):
+    if is_bot(uid):
+        return
     perms = {k: not muted for k in ALL_PERMS}
     ok = safe("restrictChatMember", chat_id=g["chat"], user_id=int(uid), permissions=perms,
               use_independent_chat_permissions=True)
@@ -274,18 +286,57 @@ def mafia_alive(g):
 
 # ---------- набор ----------
 
+BOT_NAMES = ["Валера", "Жанна", "Аркадий", "Снежана", "Геннадий", "Кристина", "Эдуард", "Анжела",
+             "Борис", "Изольда", "Тимофей", "Лариса", "Гоша", "Милана"]
+
+
 def lobby_text(g):
-    names = "\n".join(f"{i}. {html.escape(n)}" for i, n in enumerate(g["joined"].values(), 1)) or "пока никого"
+    names = "\n".join(f"{i}. {'🤖 ' if is_bot(u) else ''}{html.escape(n)}"
+                      for i, (u, n) in enumerate(g["joined"].items(), 1)) or "пока никого"
+    bots = sum(is_bot(u) for u in g["joined"])
     return (f"🎭 <b>Мафия 18+ — набор игроков</b>\n\n{names}\n\n"
-            f"Игроков: {len(g['joined'])} (нужно {E.MIN_PLAYERS}–{E.MAX_PLAYERS}).\n"
+            f"Игроков: {len(g['joined'])}{f' (из них ботов: {bots})' if bots else ''} "
+            f"— нужно {E.MIN_PLAYERS}–{E.MAX_PLAYERS}. Не хватает людей — добавьте ботов.\n"
             "Нажмите «Участвую» — откроется личка бота, там нажмите «Старт». "
             "Когда все собрались, открывший набор нажимает «Начать игру».")
 
 
 def lobby_rows(chat):
     return [[{"text": "🙋 Участвую", "url": f"https://t.me/{BOT}?start=join_{chat}"}],
+            [{"text": "🤖 + бот", "callback_data": f"addbot:{chat}"},
+             {"text": "🤖 − бот", "callback_data": f"delbot:{chat}"}],
             [{"text": "▶️ Начать игру", "callback_data": f"begin:{chat}"},
              {"text": "Выйти", "callback_data": f"leave:{chat}"}]]
+
+
+def bot_lobby(cq, chat, add):
+    """Добавить или убрать виртуального игрока — может тот, кто открыл набор, или админ."""
+    uid = str(cq["from"]["id"])
+    g = GAMES.get(chat)
+    if not g or g.get("kind") == "party" or g["status"] != "lobby":
+        answer(cq, "Набор уже закрыт")
+        return
+    if uid != g["creator"] and not is_admin(chat, uid):
+        answer(cq, "Ботов добавляет тот, кто открыл набор, или админ группы", alert=True)
+        return
+    bots = [u for u in g["joined"] if is_bot(u)]
+    if add:
+        if len(g["joined"]) >= E.MAX_PLAYERS:
+            answer(cq, f"Уже {E.MAX_PLAYERS} игроков — больше нельзя", alert=True)
+            return
+        used = set(g["joined"].values())
+        name = next((f"{n} (бот)" for n in BOT_NAMES if f"{n} (бот)" not in used), f"Бот {len(bots) + 1}")
+        bid = next(f"b{i}" for i in range(1, 100) if f"b{i}" not in g["joined"])
+        g["joined"][bid] = name
+        answer(cq, f"Добавлен {name}")
+    else:
+        if not bots:
+            answer(cq, "Ботов в списке нет")
+            return
+        del g["joined"][bots[-1]]
+        answer(cq, "Бот убран")
+    save(g)
+    edit(chat, g["msg"], lobby_text(g), lobby_rows(chat))
 
 
 def open_lobby(chat, title, user):
@@ -346,7 +397,10 @@ def begin(cq, chat):
         return
     n = len(g["joined"])
     if n < E.MIN_PLAYERS:
-        answer(cq, f"Нужно минимум {E.MIN_PLAYERS} игроков, сейчас {n}", alert=True)
+        answer(cq, f"Нужно минимум {E.MIN_PLAYERS} игроков, сейчас {n}. Не хватает людей — добавьте ботов", alert=True)
+        return
+    if all(is_bot(u) for u in g["joined"]):
+        answer(cq, "Нужен хотя бы один живой игрок — нажмите «Участвую»", alert=True)
         return
     answer(cq, "Поехали!")
     g.update(E.new_game(g["joined"]))
@@ -416,6 +470,7 @@ def start_night(g):
     g["night_no"] += 1
     g["deadline"] = now() + NIGHT_SEC
     g["prompts"] = {}
+    g["bots_at"] = now() + random.uniform(15, min(35, NIGHT_SEC - 5)) if bots_alive(g) else None
     save(g)
     send_photo(g["chat"], lambda: C.night(g["night_no"], len(E.alive(g))),
                T.pick(T.NIGHT, n=g["night_no"]) + f"\n\nНа ход — {NIGHT_SEC} с.")
@@ -452,8 +507,8 @@ def on_night_action(cq, chat, kind, target):
     g = GAMES.get(chat)
     ok, msg = apply_action(g, str(cq["from"]["id"]), kind, target)
     answer(cq, msg, alert=not ok and msg.startswith("Этот"))
-    if ok and E.night_done(g):
-        finish_night(g)
+    if ok:
+        night_progress(g)
 
 
 def on_webapp(uid, raw):
@@ -479,8 +534,8 @@ def on_webapp(uid, raw):
         report.append(f"{'✅' if ok else '⚠️'} {what}: <b>{h(g, str(target)) if str(target) in g['players'] else '?'}</b>"
                       + ("" if ok else f" — {msg.lower()}"))
     send(uid, "Ход из приложения:\n" + "\n".join(report))
-    if g["status"] == "night" and E.night_done(g):
-        finish_night(g)
+    if g["status"] == "night":
+        night_progress(g)
 
 
 def finish_night(g):
@@ -490,6 +545,8 @@ def finish_night(g):
             edit(key.split(":")[0], mid, "⏰ Время вышло, ход пропущен.")
     res = E.resolve_night(g)
     for actor, target, kind, ok in res["checks"]:
+        if is_bot(actor) and ok and kind == E.CHECK:  # комиссар-бот запоминает найденную мафию
+            g.setdefault("botmem", {}).setdefault(actor, {})["found"] = target
         if kind == E.CHECK:
             send(actor, f"🕵️ {h(g, target)} — " + ("<b>МАФИЯ!</b>" if ok else "не мафия."))
         else:
@@ -525,6 +582,7 @@ def start_day(g):
     g["day_no"] += 1
     g["deadline"] = now() + DAY_SEC
     g["tovote"] = []
+    g["bots_at"] = now() + random.uniform(10, 30) if bots_alive(g) else None  # реплика бота в чате
     a = E.alive(g)
     m = send(g["chat"], T.DAY.format(n=g["day_no"], count=len(a), names=", ".join(h(g, u) for u in a), sec=DAY_SEC),
              [[{"text": "🗳 К голосованию", "callback_data": f"tv:{g['chat']}"}]])
@@ -544,6 +602,9 @@ def on_tovote(cq, chat):
         return
     if uid not in g["tovote"]:
         g["tovote"].append(uid)
+    for b in a:  # боты поддерживают голосование, только когда его попросил человек
+        if is_bot(b) and b not in g["tovote"]:
+            g["tovote"].append(b)
     need = len(a) // 2 + 1
     if len(g["tovote"]) >= need:
         answer(cq, "Начинаем голосование")
@@ -574,11 +635,14 @@ def vote_rows(g):
 
 
 def start_vote(g):
+    if g["status"] == "day" and g.get("bots_at"):
+        bot_chatter(g)  # день оборвали раньше — бот всё равно успевает высказаться
     if g.get("day_msg"):
         safe("editMessageReplyMarkup", chat_id=g["chat"], message_id=g["day_msg"], reply_markup=kb([]))
     E.start_vote(g)
     g["status"] = "vote"
     g["deadline"] = now() + VOTE_SEC
+    g["bots_at"] = now() + random.uniform(10, min(25, VOTE_SEC - 5)) if bots_alive(g) else None
     m = send(g["chat"], vote_text(g), vote_rows(g))
     g["vote_msg"] = m and m["message_id"]
     save(g)
@@ -605,6 +669,9 @@ def cast_vote(g, uid, target):
     if not E.record_vote(g, uid, target):
         return False, "За себя голосовать нельзя"
     save(g)
+    if g.get("bots_at") and all(v in g["votes"] for v in E.voters(g) if not is_bot(v)):
+        bots_vote(g)  # люди проголосовали — боты не тянут время
+        return True, "Голос принят. Его никто не увидит"
     if E.vote_done(g):
         finish_vote(g)
     else:
@@ -635,6 +702,90 @@ def finish_vote(g):
     save(g)
     if not check_win(g):
         start_night(g)
+
+
+# ---------- боты-игроки ----------
+
+BOT_CHATTER = ["Я мирный, честно-честно.", "Что-то {x} подозрительно молчит…", "{x}, а ты где был ночью?",
+               "Голосую за {x}, интуиция подсказывает.", "Мне кажется, мафия среди тех, кто громче всех шутит.",
+               "Давайте не торопиться, у меня алиби: я спал.", "{x} слишком хорошо всё объясняет. Не верю."]
+
+
+def bots_alive(g):
+    return [u for u in E.alive(g) if is_bot(u)]
+
+
+def bot_target(g, b, kind, targets):
+    """Ход бота ночью: мафия поддерживает выбор семьи, комиссар не проверяет одних и тех же."""
+    if kind == E.KILL:
+        votes = [t for k, t in g["night"]["acts"].items() if k.endswith(":" + E.KILL) and t in targets]
+        if votes:
+            return Counter(votes).most_common(1)[0][0]
+    mem = g.setdefault("botmem", {}).setdefault(b, {})
+    if kind in (E.CHECK, E.DON_CHECK):
+        fresh = [t for t in targets if t not in mem.get("checked", [])]
+        t = random.choice(fresh or targets)
+        mem.setdefault("checked", []).append(t)
+        return t
+    if kind == E.HEAL and b in targets and random.random() < .3:
+        return b
+    return random.choice(targets)
+
+
+def bots_night(g):
+    g["bots_at"] = None
+    for u, kind, targets in E.night_tasks(g):
+        if is_bot(u) and f"{u}:{kind}" not in g["night"]["acts"]:
+            apply_action(g, u, kind, bot_target(g, u, kind, targets))
+    save(g)
+
+
+def night_progress(g):
+    """После хода человека: если все люди походили — боты ходят сразу; все походили — утро."""
+    if g.get("bots_at") and all(f"{u}:{k}" in g["night"]["acts"] for u, k, _ in E.night_tasks(g) if not is_bot(u)):
+        bots_night(g)
+    if g["status"] == "night" and E.night_done(g):
+        finish_night(g)
+
+
+def bot_vote_target(g, b):
+    a = [t for t in E.alive(g) if t != b]
+    found = g.get("botmem", {}).get(b, {}).get("found")
+    if found in a:
+        return found
+    count = Counter(t for t in g["votes"].values() if t != E.SKIP and t in a)
+    if E.is_mafia(g, b):
+        pool = [t for t in a if not E.is_mafia(g, t)] or a
+        lead = [t for t, _ in count.most_common() if t in pool]
+        return lead[0] if lead and random.random() < .7 else random.choice(pool)
+    if count and random.random() < .5:
+        return count.most_common(1)[0][0]
+    return E.SKIP if random.random() < .15 else random.choice(a)
+
+
+def bots_vote(g):
+    g["bots_at"] = None
+    for b in E.voters(g):
+        if is_bot(b) and b not in g["votes"]:
+            E.record_vote(g, b, bot_vote_target(g, b))
+    save(g)
+    if E.vote_done(g):
+        finish_vote(g)
+    else:
+        edit(g["chat"], g.get("vote_msg"), vote_text(g), vote_rows(g))
+
+
+def bot_chatter(g):
+    g["bots_at"] = None
+    bots = bots_alive(g)
+    if bots:
+        b = random.choice(bots)
+        found = g.get("botmem", {}).get(b, {}).get("found")
+        others = [t for t in E.alive(g) if t != b]
+        line = (f"Я кое-что знаю: {g['players'][found]['name']} — мафия! Голосуйте за него."
+                if found in others else random.choice(BOT_CHATTER).format(x=g["players"][random.choice(others)]["name"]))
+        send(g["chat"], f"🤖 <b>{h(g, b)}</b>: {html.escape(line)}")
+    save(g)
 
 
 # ---------- конец ----------
@@ -895,6 +1046,21 @@ def menu_callback(cq, game):
 
 def tick():
     for g in list(GAMES.values()):
+        if g.get("bots_at") and now() >= g["bots_at"] and not is_party(g):
+            try:
+                if g["status"] == "night":
+                    bots_night(g)
+                    if E.night_done(g):
+                        finish_night(g)
+                elif g["status"] == "day":
+                    bot_chatter(g)
+                elif g["status"] == "vote":
+                    bots_vote(g)
+            except Exception:
+                log("боты: " + traceback.format_exc())
+                g["bots_at"] = None
+            if g["chat"] not in GAMES:
+                continue
         if g["deadline"] > now():
             continue
         try:
@@ -918,7 +1084,7 @@ def tick():
 def next_wait():
     if not GAMES:
         return 25
-    nearest = min(g["deadline"] for g in GAMES.values())
+    nearest = min(min(g["deadline"], g.get("bots_at") or g["deadline"]) for g in GAMES.values())
     return max(1, min(25, int(nearest - now()) + 1))
 
 
@@ -1009,6 +1175,8 @@ def on_callback(cq):
         kind = parts[0]
         if kind == "begin":
             begin(cq, parts[1])
+        elif kind in ("addbot", "delbot"):
+            bot_lobby(cq, parts[1], kind == "addbot")
         elif kind == "leave":
             leave(cq, parts[1])
         elif kind == "n":

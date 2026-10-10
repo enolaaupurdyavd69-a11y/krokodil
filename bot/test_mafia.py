@@ -438,6 +438,57 @@ class BotFlow(unittest.TestCase):
                          "с мини-приложением в BotFather — открывается внутри Telegram")
         self.assertNotIn(GROUP, B.GAMES, "в группе ничего не запускается — игра на одном телефоне")
 
+    def test_bots_fill_the_game(self):
+        """1 человек + 6 ботов: партия доходит до конца, ботам ничего не отправляется."""
+        self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
+        self.msg(1, "private", 1, f"/start join_{GROUP}")
+        self.press(2, f"addbot:{GROUP}", GROUP)
+        self.assertIn("открыл набор", self.answers()[-1], "чужой не добавляет ботов")
+        for _ in range(7):
+            self.press(1, f"addbot:{GROUP}", GROUP)
+        self.press(1, f"delbot:{GROUP}", GROUP)
+        g = B.GAMES[GROUP]
+        self.assertEqual(sum(B.is_bot(u) for u in g["joined"]), 6)
+        self.assertIn("(бот)", "".join(g["joined"].values()))
+        self.press(1, f"begin:{GROUP}", GROUP)
+        self.assertEqual(g["status"], "night")
+        for _ in range(80):
+            g = B.GAMES.get(GROUP)
+            if not g:
+                break
+            if g["status"] == "night" and g["players"]["1"]["alive"]:
+                for u, kind, targets in E.night_tasks(g):
+                    if u == "1" and f"1:{kind}" not in g["night"]["acts"]:
+                        self.press(1, f"n:{GROUP}:{kind}:{targets[0]}")
+            elif g["status"] == "day" and "1" in E.voters(g):
+                self.press(1, f"tv:{GROUP}", GROUP)
+            elif g["status"] == "vote" and "1" in E.voters(g) and "1" not in g["votes"]:
+                self.press(1, f"v:{GROUP}:{E.SKIP}", GROUP)
+            if GROUP in B.GAMES and B.GAMES[GROUP]["status"] == g["status"]:
+                self.clock[0] += 5  # время идёт — боты делают ходы по своим таймерам
+                B.tick()
+        self.assertNotIn(GROUP, B.GAMES, "партия с ботами должна закончиться")
+        self.assertIn("Роли:", self.tg.to(GROUP)[-1]["text"])
+        to_bots = [p["chat_id"] for m, p in self.tg.sent if str(p.get("chat_id", "")).startswith("b")]
+        self.assertEqual(to_bots, [], "ботам ничего не отправляем")
+        self.assertTrue(any("🤖" in p["text"] for p in self.tg.to(GROUP)), "боты пишут реплики днём")
+
+    def test_only_bots_cannot_start(self):
+        self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
+        for _ in range(5):
+            self.press(1, f"addbot:{GROUP}", GROUP)
+        self.press(1, f"begin:{GROUP}", GROUP)
+        self.assertIn("живой игрок", self.answers()[-1])
+        self.assertEqual(B.GAMES[GROUP]["status"], "lobby")
+
+    def test_bot_mafia_follows_family(self):
+        st = make([E.DON, E.MAFIA, E.DOCTOR, E.SHERIFF, E.LOVER, E.CIVIL, E.CIVIL])
+        E.start_night(st)
+        E.record_action(st, "1", E.KILL, "6")          # живой дон выбрал жертву
+        targets = [t for u, k, ts in E.night_tasks(st) if u == "2" and k == E.KILL for t in ts]
+        for _ in range(20):
+            self.assertEqual(B.bot_target(st, "2", E.KILL, targets), "6", "бот-мафиози поддерживает семью")
+
     def test_dead_cannot_vote(self):
         g = self.lobby(5)
         self.press(1, f"begin:{GROUP}", GROUP)
