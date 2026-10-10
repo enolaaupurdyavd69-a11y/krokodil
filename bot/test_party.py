@@ -34,7 +34,7 @@ class Matching(unittest.TestCase):
     def test_decks_and_draw(self):
         decks = P.load_decks()
         self.assertEqual(len(decks["croc"]), 300)
-        self.assertEqual(len(decks["tabu"]), 180)
+        self.assertEqual(len(decks["tabu"]), 300)
         used = []
         seen = {P.draw(decks["tabu"], used)["t"] for _ in range(180)}
         self.assertEqual(len(seen), 180, "без повторов, пока колода не кончилась")
