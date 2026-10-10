@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#140f1f">
+  <title>Мафия 18+ — моя роль</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;800&family=Manrope:wght@400;600;700&display=swap">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ground: #140f1f; --screen: #1d1530; --raise: #2a1f44; --line: #3a2d5c;
+      --fg: #f3eefc; --muted: #a99cc6; --pink: #ff4fa3; --amber: #ffb547; --ok: #3ddc97; --bad: #ff6b6b;
+      --role: var(--pink);
+      --display: "Unbounded", "Arial Black", system-ui, sans-serif;
+      --body: "Manrope", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--ground); color: var(--fg); font-family: var(--body); -webkit-tap-highlight-color: transparent; }
+    [hidden] { display: none !important; }
+    main { max-width: 480px; margin: 0 auto; padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 16px; }
+    .eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+    h1, h2 { font-family: var(--display); margin: 0; text-wrap: balance; }
+    p { margin: 0; line-height: 1.5; }
+    .muted { color: var(--muted); }
+    .small { font-size: 13px; }
+
+    .card { position: relative; overflow: hidden; border-radius: 24px; padding: 24px 20px; text-align: center;
+            background: radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--role) 30%, transparent), transparent 60%), var(--raise);
+            border: 1px solid color-mix(in srgb, var(--role) 50%, var(--line)); display: grid; gap: 10px; justify-items: center; }
+    .icon { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 60px;
+            background: color-mix(in srgb, var(--role) 22%, var(--ground)); border: 3px solid var(--role); }
+    .card h1 { font-size: 30px; color: var(--role); }
+    .goal { font-size: 13px; color: var(--muted); }
+    .mates { font-weight: 700; color: var(--bad); }
+
+    .night { display: grid; gap: 14px; }
+    .night-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .timer { font-family: var(--display); font-variant-numeric: tabular-nums; color: var(--pink); }
+    .task { display: grid; gap: 10px; }
+    .task h2 { font-size: 16px; font-family: var(--body); font-weight: 700; }
+    .targets { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+    .target { border: 2px solid var(--line); background: var(--raise); color: var(--fg); border-radius: 16px; padding: 12px 6px;
+              display: grid; gap: 6px; justify-items: center; font: 600 13px var(--body); cursor: pointer; }
+    .target .av { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font: 800 18px var(--display); color: var(--ground); }
+    .target .nm { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .target.on { border-color: var(--role); background: color-mix(in srgb, var(--role) 18%, var(--raise)); }
+    .target:focus-visible, .send:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    .send { border: 0; border-radius: 16px; padding: 16px; font: 600 15px var(--display); background: var(--pink); color: #fff; cursor: pointer; }
+    .send:disabled { opacity: .4; }
+
+    .note { background: var(--raise); border-radius: 16px; padding: 14px 16px; line-height: 1.5; }
+    .town { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+    .town div { display: flex; align-items: center; gap: 8px; background: var(--screen); border-radius: 12px; padding: 8px 10px; font-size: 13px; min-width: 0; }
+    .town .av { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center; font: 800 12px var(--display); color: var(--ground); }
+    .town .dead { opacity: .45; }
+    .town span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main id="app"><p class="muted">Загрузка…</p></main>
+<script>
+'use strict';
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const ROLES = {
+    mafia:   ['🔪', 'Мафия', '#ff6b6b', 'Ночью вместе с семьёй выбираете, кого убрать. Днём притворяйтесь приличным человеком.'],
+    don:     ['🎩', 'Дон мафии', '#ffb547', 'Голосуете с семьёй за убийство, при равенстве решает ваш голос. Каждую ночь можете проверить одного игрока: не комиссар ли он.'],
+    doctor:  ['💉', 'Доктор', '#3ddc97', 'Ночью лечите одного игрока — если на него нападут, он выживет. Одного и того же два раза подряд нельзя, себя — только один раз за игру.'],
+    sheriff: ['🚓', 'Комиссар', '#2aabee', 'Каждую ночь проверяете одного игрока: мафия он или нет. Днём решайте сами, выдавать себя или нет.'],
+    lover:   ['💋', 'Любовница', '#ff4fa3', 'Ночью заглядываете к одному игроку. Ему становится не до дел: его ночное действие не срабатывает.'],
+    maniac:  ['🪓', 'Маньяк', '#ff7a45', 'Играете сам за себя. Каждую ночь убиваете одного игрока. Побеждаете, если останетесь один на один с мирным.'],
+    civil:   ['🙂', 'Мирный житель', '#b388ff', 'Ночью спите. Днём ищете мафию и голосуете с умом.'],
+  };
+  const GOALS = { mafia: 'Цель: мафии должно стать не меньше, чем остальных.', don: 'Цель: мафии должно стать не меньше, чем остальных.',
+                  maniac: 'Цель: остаться в живых последним, не считая одного мирного.' };
+  const TASKS = { kill: '🔪 Кого семья убирает?', doncheck: '🎩 Кого проверить: не комиссар ли?', heal: '💉 Кого лечите?',
+                  check: '🚓 Кого проверяете?', visit: '💋 К кому заглянете?', maniac: '🪓 К кому зайти с топором?' };
+  const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45', '#5ed6d6', '#f06292'];
+  const app = document.getElementById('app');
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function decode() {
+    const d = new URLSearchParams(location.search).get('d');
+    if (!d) return null;
+    try {
+      const b = atob(d.replace(/-/g, '+').replace(/_/g, '/'));
+      return JSON.parse(new TextDecoder().decode(Uint8Array.from(b, c => c.charCodeAt(0))));
+    } catch { return null; }
+  }
+
+  const data = decode();
+  if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor && tg.setHeaderColor('#140f1f'); tg.setBackgroundColor && tg.setBackgroundColor('#140f1f'); } catch { /* старый клиент */ } }
+  if (!data || !ROLES[data.r]) {
+    app.innerHTML = '<h2>Мафия 18+</h2><p class="muted">Откройте эту страницу кнопкой «🎭 Моя роль» в личке бота во время партии.</p>';
+    return;
+  }
+
+  const [icon, roleName, color, about] = ROLES[data.r];
+  document.documentElement.style.setProperty('--role', color);
+  const ids = Object.keys(data.p || {});
+  const colorOf = uid => COLORS[ids.indexOf(uid) % COLORS.length];
+  const nameOf = uid => (data.p[uid] || ['?'])[0];
+  const initial = uid => esc((nameOf(uid).match(/[\p{L}\p{N}]/u) || ['?'])[0].toUpperCase());
+  const tasks = data.t || {};
+  const chosen = {};
+  const nightOpen = () => data.dl && Date.now() / 1000 < data.dl && Object.keys(tasks).length > 0;
+
+  function render() {
+    const open = nightOpen();
+    const left = data.dl ? Math.max(0, Math.round(data.dl - Date.now() / 1000)) : 0;
+    const mmss = s => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    const ready = Object.keys(tasks).every(k => chosen[k]);
+    app.innerHTML = `
+      <div class="eyebrow">Мафия 18+ · ${esc(data.g || '')}</div>
+      <section class="card">
+        <div class="icon" aria-hidden="true">${icon}</div>
+        <h1>${roleName}</h1>
+        <p>${about}</p>
+        <p class="goal">${GOALS[data.r] || 'Цель: вычислить и казнить всю мафию и маньяка.'}</p>
+        ${data.m && data.m.length ? `<p class="mates">Ваша семья: ${data.m.map(esc).join(', ')}</p>` : ''}
+      </section>
+      ${open ? `
+      <section class="night">
+        <div class="night-head"><h2>Ночь ${data.n}</h2><span class="timer" id="left">${mmss(left)}</span></div>
+        ${Object.entries(tasks).map(([k, targets]) => `
+          <div class="task"><h2>${TASKS[k] || k}</h2>
+            <div class="targets">${targets.map(uid => `
+              <button class="target ${chosen[k] === uid ? 'on' : ''}" data-k="${k}" data-t="${esc(uid)}">
+                <span class="av" style="background:${colorOf(uid)}">${initial(uid)}</span>
+                <span class="nm">${esc(nameOf(uid))}</span></button>`).join('')}</div></div>`).join('')}
+        <button class="send" id="send" ${ready ? '' : 'disabled'}>${ready ? 'Отправить ход' : 'Выберите цель'}</button>
+        <p class="muted small" id="err"></p>
+      </section>` : `
+      <p class="note">${data.dl && Object.keys(tasks).length ? '⏰ Эта ночь уже закончилась — смотрите, что случилось, в группе.'
+          : data.n ? '😴 Сейчас ваш ход не нужен. Днём обсуждаем и голосуем в группе.' : 'Партия начинается — первая ночь вот-вот наступит.'}</p>`}
+      <section class="stack">
+        <div class="eyebrow" style="margin-bottom:8px">Город</div>
+        <div class="town">${ids.map(uid => `<div class="${data.p[uid][1] ? '' : 'dead'}">
+          <span class="av" style="background:${colorOf(uid)}">${initial(uid)}</span><span>${data.p[uid][1] ? '' : '💀 '}${esc(nameOf(uid))}</span></div>`).join('')}</div>
+      </section>`;
+  }
+
+  app.addEventListener('click', e => {
+    const t = e.target.closest('.target');
+    if (t) {
+      chosen[t.dataset.k] = t.dataset.t;
+      try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch { /* */ }
+      return render();
+    }
+    if (e.target.id === 'send') {
+      const payload = JSON.stringify({ a: 'n', c: data.c, n: data.n, acts: chosen });
+      try {
+        if (!tg || !tg.initData) throw new Error('не в Telegram');
+        tg.sendData(payload);  // Telegram передаст ход боту и закроет окно
+      } catch {
+        document.getElementById('err').textContent = 'Не удалось отправить отсюда. Выберите кнопками в чате с ботом.';
+      }
+    }
+  });
+
+  render();
+  setInterval(() => {
+    const el = document.getElementById('left');
+    if (el) {
+      const left = Math.max(0, Math.round(data.dl - Date.now() / 1000));
+      el.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
+      if (!left) render();
+    }
+  }, 1000);
+})();
+</script>
+</body>
+</html>

@@ -12,6 +12,7 @@
 | `style.css` | оформление |
 | `words/index.json` | список категорий |
 | `words/<id>.json` | слова Крокодила: `[{"t": "Слово", "d": 1}]`, `d` — сложность 1–3 |
+| `mafia.html` | мини-приложение «🎭 Моя роль»: карточка роли и ночной ход (данные — в ссылке, ход — через sendData) |
 | `words/tabu/<id>.json` | карточки Табу: `[{"t": "Слово", "x": [5 запретных], "d": 1}]` |
 
 ## Как добавить слова
@@ -53,6 +54,7 @@ python -m http.server 8765
 | `bot/mafia_engine.py` | логика: роли, ночь, голосование, победа (без Telegram) |
 | `bot/mafia_bot.py` | бот: набор, роли в личку, ночные кнопки, голосование, таймеры, SQLite |
 | `bot/party_engine.py` | Крокодил/Табу в группе: словари (общие с сайтом), проверка догадок и нарушений |
+| `bot/cards.py` | картинки Мафии (Pillow): ночь, утро с табло города, приговор, финал, карточка роли |
 | `bot/texts.py` | тексты 18+ |
 | `bot/test_mafia.py`, `bot/test_party.py` | тесты: `cd bot && python -X utf8 -m unittest test_mafia test_party` |
 | `bot/install_task.ps1` | автозапуск: задача Планировщика `KrokodilMafiaBot` |

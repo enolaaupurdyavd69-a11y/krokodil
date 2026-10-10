@@ -2,6 +2,7 @@
 
 Запуск из папки bot:  python -X utf8 -m unittest -v test_mafia
 """
+import json
 import random
 import tempfile
 import unittest
@@ -151,17 +152,25 @@ class FakeTelegram:
     def __init__(self):
         self.sent, self.next_id, self.admins = [], 100, set()
 
-    def __call__(self, method, **p):
+    has_app = False
+
+    def __call__(self, method, files=None, **p):
+        if method == "sendPhoto":
+            assert files and files["photo"][1][1:4] == b"PNG", "картинка должна быть PNG"
+            p["text"] = p.get("caption", "")
+            self.photos = getattr(self, "photos", 0) + 1
         self.sent.append((method, p))
-        if method == "sendMessage":
+        if method in ("sendMessage", "sendPhoto"):
             self.next_id += 1
             return {"message_id": self.next_id, "chat": {"id": p["chat_id"]}}
         if method == "getChatMember":
             return {"status": "administrator" if str(p["user_id"]) in self.admins else "member"}
+        if method == "getMe":
+            return {"username": "krokodil_party_18_bot", "has_main_web_app": self.has_app}
         return True
 
     def to(self, chat):
-        return [p for m, p in self.sent if m == "sendMessage" and str(p["chat_id"]) == str(chat)]
+        return [p for m, p in self.sent if m in ("sendMessage", "sendPhoto") and str(p["chat_id"]) == str(chat)]
 
     def last_buttons(self, chat):
         msgs = [p for p in self.to(chat) if "reply_markup" in p]
@@ -180,9 +189,10 @@ class BotFlow(unittest.TestCase):
         B.GAMES.clear()
         B.BOT = "krokodil_party_18_bot"
         self.tg = FakeTelegram()
-        B.api = self.tg
+        B.api = B.api_upload = self.tg
         self.clock = [1_000_000.0]
         B.now = lambda: self.clock[0]
+        B._app_check[:] = [0.0, False]
         self.cq_id = 0
 
     def tearDown(self):
@@ -278,6 +288,8 @@ class BotFlow(unittest.TestCase):
                 self.play(n, rng)
                 final = self.tg.to(GROUP)[-1]["text"]
                 self.assertIn("Роли:", final)
+                self.assertTrue(any(m == "sendPhoto" and str(p["chat_id"]) == GROUP for m, p in self.tg.sent),
+                                "ночь/утро/финал — картинками")
                 self.assertEqual(B.load_games(), {}, "законченная партия удалена из базы")
 
     def test_restart_resumes(self):
@@ -297,6 +309,55 @@ class BotFlow(unittest.TestCase):
         self.clock[0] += B.RESUME_GRACE + 1
         B.tick()
         self.assertIn(B.GAMES.get(GROUP, {}).get("status", "over"), ("day", "over"))
+
+    def keyboard_data(self, uid):
+        """Данные, зашитые в кнопку «🎭 Моя роль» последнего сообщения игроку."""
+        import base64, json, urllib.parse
+        for p in reversed(self.tg.to(uid)):
+            kb = p.get("reply_markup", {}).get("keyboard")
+            if kb:
+                url = kb[0][0]["web_app"]["url"]
+                d = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["d"][0]
+                return url, json.loads(base64.urlsafe_b64decode(d + "=" * (-len(d) % 4)).decode("utf-8"))
+        self.fail(f"у игрока {uid} нет кнопки «Моя роль»")
+
+    def test_role_card_and_webapp_move(self):
+        g = self.lobby(7)
+        self.press(1, f"begin:{GROUP}", GROUP)
+        self.assertGreaterEqual(self.tg.photos, 7 + 1, "карточки ролей в личку и баннер ночи в группу")
+        don = next(u for u, p in g["players"].items() if p["role"] == E.DON)
+        url, data = self.keyboard_data(don)
+        self.assertTrue(url.startswith(B.MAFIA_URL))
+        self.assertEqual(data["r"], E.DON)
+        self.assertEqual(set(data["t"]), {E.KILL, E.DON_CHECK}, "дону — убийство и проверка")
+        self.assertEqual(len(data["m"]), 1, "дон видит свою семью")
+        victim = data["t"][E.KILL][0]
+        # ход из мини-приложения приходит боту сообщением web_app_data
+        B.handle({"message": {"chat": {"id": int(don), "type": "private"}, "from": {"id": int(don)},
+                              "web_app_data": {"data": json.dumps({"a": "n", "c": GROUP, "n": 1,
+                                               "acts": {E.KILL: victim, E.DON_CHECK: data["t"][E.DON_CHECK][1]}})}}})
+        self.assertEqual(g["night"]["acts"][f"{don}:{E.KILL}"], victim)
+        self.assertIn("Ход из приложения", self.tg.to(don)[-1]["text"])
+        # повтор того же хода — отказ, а не двойной голос
+        B.handle({"message": {"chat": {"id": int(don), "type": "private"}, "from": {"id": int(don)},
+                              "web_app_data": {"data": json.dumps({"a": "n", "c": GROUP, "n": 1, "acts": {E.KILL: victim}})}}})
+        self.assertIn("уже сделан", self.tg.to(don)[-1]["text"])
+        # ход за прошлую ночь не принимается
+        B.handle({"message": {"chat": {"id": int(don), "type": "private"}, "from": {"id": int(don)},
+                              "web_app_data": {"data": json.dumps({"a": "n", "c": GROUP, "n": 0, "acts": {}})}}})
+        self.assertIn("закончилась", self.tg.to(don)[-1]["text"])
+
+    def test_krokodil_opens_app(self):
+        self.msg(GROUP, "supergroup", 1, "/krokodil", "Пятница")
+        btn = self.tg.to(GROUP)[-1]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(btn["url"], B.APP_URL + "?mode=croc")
+        self.tg.has_app = True
+        B._app_check[:] = [0.0, False]
+        self.msg(GROUP, "supergroup", 1, "/tabu", "Пятница")
+        btn = self.tg.to(GROUP)[-1]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(btn["url"], "https://t.me/krokodil_party_18_bot?startapp=tabu",
+                         "с мини-приложением в BotFather — открывается внутри Telegram")
+        self.assertNotIn(GROUP, B.GAMES, "в группе ничего не запускается — игра на одном телефоне")
 
     def test_dead_cannot_vote(self):
         g = self.lobby(5)

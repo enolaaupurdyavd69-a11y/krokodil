@@ -5,7 +5,9 @@
 Токен — bot/token.txt (в .gitignore). База партий и лог — bot/data/.
 Партии лежат в SQLite: после перезапуска ПК бот продолжает с той же фазы.
 """
+import base64
 import html
+import io
 import json
 import sqlite3
 import sys
@@ -13,12 +15,22 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from collections import Counter
 from pathlib import Path
 
 import mafia_engine as E
 import party_engine as P
 import texts as T
+
+try:
+    import cards as C  # картинки (Pillow); без него бот работает текстом
+except ImportError:
+    C = None
+
+APP_URL = "https://enolaaupurdyavd69-a11y.github.io/krokodil/"
+MAFIA_URL = APP_URL + "mafia.html"
+APP_VER = "3"  # меняется вместе с VER в app.js — сбрасывает кеш Telegram
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -94,15 +106,69 @@ def safe(method, **params):
     return None
 
 
+def api_upload(method, files, **params):
+    """Запрос с файлами (multipart) — для отправки картинок."""
+    boundary = uuid.uuid4().hex
+    body = io.BytesIO()
+    for k, v in params.items():
+        v = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+        body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode("utf-8"))
+    for k, (fname, data) in files.items():
+        body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{fname}"\r\n'
+                   'Content-Type: image/png\r\n\r\n'.encode("utf-8"))
+        body.write(data)
+        body.write(b"\r\n")
+    body.write(f"--{boundary}--\r\n".encode("utf-8"))
+    req = urllib.request.Request(API + method, data=body.getvalue(),
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            res = json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            res = json.load(e)
+        except ValueError:
+            raise TgError(e.code, str(e)) from None
+    if not res.get("ok"):
+        raise TgError(res.get("error_code"), res.get("description"))
+    return res["result"]
+
+
 def kb(rows):
     return {"inline_keyboard": rows}
 
 
-def send(chat, text, rows=None):
+REMOVE_KEYBOARD = {"remove_keyboard": True}
+
+
+def send(chat, text, rows=None, markup=None):
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    if rows:
-        p["reply_markup"] = kb(rows)
+    if rows or markup:
+        p["reply_markup"] = markup or kb(rows)
     return safe("sendMessage", **p)
+
+
+def send_photo(chat, make, caption, rows=None, markup=None):
+    """Картинка с подписью. make() рисует PNG; не вышло — отправляем ту же подпись текстом."""
+    data = None
+    if C:
+        try:
+            data = make()
+        except Exception:
+            log("картинка: " + traceback.format_exc())
+    if data:
+        p = {"chat_id": chat, "parse_mode": "HTML"}
+        long_caption = len(caption) > 1024  # лимит подписи к фото — отправим текст отдельно
+        if not long_caption:
+            p["caption"] = caption
+            if rows or markup:
+                p["reply_markup"] = markup or kb(rows)
+        try:
+            m = api_upload("sendPhoto", {"photo": ("card.png", data)}, **p)
+            return send(chat, caption, rows, markup) if long_caption else m
+        except (TgError, OSError) as e:
+            log(f"sendPhoto: {e}")
+    return send(chat, caption, rows, markup)
 
 
 def edit(chat, msg_id, text, rows=None):
@@ -292,11 +358,17 @@ def begin(cq, chat):
     for u, p in g["players"].items():
         text = (f"Ваша роль в игре «{html.escape(g['title'])}»:\n\n{T.ROLE_INFO[p['role']]}\n\n"
                 f"{T.TEAM_GOAL.get(p['role'], T.TOWN_GOAL)}")
+        mates = []
         if E.is_mafia(g, u):
-            mates = [f"{h(g, v)} ({role_name(g, v)})" for v in mafia_alive(g) if v != u]
-            text += ("\n\nВаша семья: " + ", ".join(mates) if mates else "\n\nВы работаете в одиночку.")
+            mates = [v for v in mafia_alive(g) if v != u]
+            names = [f"{h(g, v)} ({role_name(g, v)})" for v in mates]
+            text += ("\n\nВаша семья: " + ", ".join(names) if names else "\n\nВы работаете в одиночку.")
             text += "\nВсё, что вы пишете сюда, увидят остальные мафиози."
-        if send(u, text) is None:
+        text += "\n\nКнопка «🎭 Моя роль» внизу — ваша карточка и ночной ход."
+        card = lambda p=p, mates=mates: C.role_card(  # noqa: E731 — картинка рисуется внутри send_photo
+            p["role"], E.ROLE_NAMES[p["role"]], T.ROLE_PLAIN[p["role"]], T.TEAM_GOAL.get(p["role"], T.TOWN_GOAL),
+            g["title"], [g["players"][v]["name"] for v in mates])
+        if send_photo(u, card, text, markup=role_keyboard(g, u)) is None:
             failed.append(h(g, u))
     if failed:
         send(chat, "⚠️ Не смог написать: " + ", ".join(failed) + ". Откройте личку бота и нажмите «Старт».")
@@ -310,6 +382,26 @@ def target_rows(g, prefix, targets):
     return [btns[i:i + 2] for i in range(0, len(btns), 2)]
 
 
+def b64(obj):
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def role_keyboard(g, uid):
+    """Постоянная кнопка «🎭 Моя роль» в личке. Всё нужное странице — прямо в ссылке:
+    ПК в интернет не открываем, ход возвращается боту через Telegram (sendData)."""
+    p = g["players"][uid]
+    data = {"c": g["chat"], "g": g["title"][:40], "r": p["role"], "n": g.get("night_no", 0),
+            "m": [g["players"][v]["name"][:20] for v in mafia_alive(g) if v != uid] if E.is_mafia(g, uid) else [],
+            "p": {u: [q["name"][:20], int(q["alive"])] for u, q in g["players"].items()}}
+    if g["status"] == "night":
+        data["t"] = {k: ts for u, k, ts in E.night_tasks(g) if u == uid}
+        data["dl"] = int(g["deadline"])
+    url = f"{MAFIA_URL}?v={APP_VER}&d={b64(data)}"
+    return {"keyboard": [[{"text": "🎭 Моя роль", "web_app": {"url": url}}]],
+            "resize_keyboard": True, "is_persistent": True}
+
+
 def start_night(g):
     E.start_night(g)
     g["status"] = "night"
@@ -317,35 +409,66 @@ def start_night(g):
     g["deadline"] = now() + NIGHT_SEC
     g["prompts"] = {}
     save(g)
-    send(g["chat"], T.pick(T.NIGHT, n=g["night_no"]) + f"\n\nНа ход — {NIGHT_SEC} с.")
-    for u, kind, targets in E.night_tasks(g):
+    send_photo(g["chat"], lambda: C.night(g["night_no"], len(E.alive(g))),
+               T.pick(T.NIGHT, n=g["night_no"]) + f"\n\nНа ход — {NIGHT_SEC} с.")
+    tasks = E.night_tasks(g)
+    for u in dict.fromkeys(t[0] for t in tasks):  # обновить кнопку «Моя роль»: в ней ночной выбор
+        send(u, f"🌙 Ночь {g['night_no']} — ваш ход. Удобнее всего — кнопка «🎭 Моя роль» внизу. "
+                "Или выберите кнопками ниже.", markup=role_keyboard(g, u))
+    for u, kind, targets in tasks:
         m = send(u, T.PROMPTS[kind].format(n=g["night_no"]), target_rows(g, f"n:{g['chat']}:{kind}", targets))
         if m:
             g["prompts"][f"{u}:{kind}"] = m["message_id"]
     save(g)
 
 
-def on_night_action(cq, chat, kind, target):
-    uid = str(cq["from"]["id"])
-    g = GAMES.get(chat)
+def apply_action(g, uid, kind, target):
+    """Ночной ход из кнопки в чате или из мини-приложения. Возвращает (принят ли, текст для игрока)."""
     if not g or g["status"] != "night":
-        answer(cq, "Ночь уже закончилась")
-        return
+        return False, "Ночь уже закончилась"
     if f"{uid}:{kind}" in g["night"]["acts"]:
-        answer(cq, "Выбор уже сделан")
-        return
+        return False, "Выбор уже сделан"
     if not E.record_action(g, uid, kind, target):
-        answer(cq, "Этот выбор сейчас недоступен", alert=True)
-        return
-    answer(cq, "Принято")
-    edit(uid, cq["message"]["message_id"],
+        return False, "Этот выбор сейчас недоступен"
+    edit(uid, g["prompts"].get(f"{uid}:{kind}"),
          T.PROMPTS[kind].format(n=g["night_no"]) + f"\n\nВыбор: <b>{h(g, target)}</b>")
     if kind == E.KILL:
         for v in mafia_alive(g):
             if v != uid:
                 send(v, f"🔪 {h(g, uid)} голосует за <b>{h(g, target)}</b>")
     save(g)
-    if E.night_done(g):
+    return True, "Принято"
+
+
+def on_night_action(cq, chat, kind, target):
+    g = GAMES.get(chat)
+    ok, msg = apply_action(g, str(cq["from"]["id"]), kind, target)
+    answer(cq, msg, alert=not ok and msg.startswith("Этот"))
+    if ok and E.night_done(g):
+        finish_night(g)
+
+
+def on_webapp(uid, raw):
+    """Ход из мини-приложения «Моя роль»: Telegram присылает его боту как сообщение web_app_data."""
+    try:
+        data = json.loads(raw)
+        g = GAMES.get(str(data["c"]))
+        acts = dict(data["acts"])
+    except (ValueError, KeyError, TypeError):
+        send(uid, "Не понял ход из приложения. Выберите кнопками в чате.")
+        return
+    if not g or g.get("night_no") != data.get("n"):
+        send(uid, "Эта ночь уже закончилась.")
+        return
+    report = []
+    for kind, target in acts.items():
+        ok, msg = apply_action(g, uid, str(kind), str(target))
+        what = {"kill": "убить", "doncheck": "проверить", "heal": "лечить", "check": "проверить",
+                "visit": "навестить", "maniac": "навестить с топором"}.get(kind, kind)
+        report.append(f"{'✅' if ok else '⚠️'} {what}: <b>{h(g, str(target)) if str(target) in g['players'] else '?'}</b>"
+                      + ("" if ok else f" — {msg.lower()}"))
+    send(uid, "Ход из приложения:\n" + "\n".join(report))
+    if g["status"] == "night" and E.night_done(g):
         finish_night(g)
 
 
@@ -365,10 +488,11 @@ def finish_night(g):
     lines = [T.pick(T.DEATH, name=h(g, d), role=role_name(g, d)) for d in res["dead"]]
     if not lines:
         lines.append(T.pick(T.SAVED) if res["saved"] else T.pick(T.QUIET))
-    send(chat, "\n\n".join(lines))
+    send_photo(chat, lambda: C.morning(g["night_no"], g["players"], res["dead"], E.ROLE_NAMES, bool(res["saved"])),
+               "\n\n".join(lines))
     for d in res["dead"]:
         set_muted(g, d, True)
-        send(d, "☠️ Вас убили этой ночью. Группу читать можно, писать — нет: мёртвые молчат.")
+        send(d, "☠️ Вас убили этой ночью. Группу читать можно, писать — нет: мёртвые молчат.", markup=REMOVE_KEYBOARD)
     save(g)
     if not check_win(g):
         start_day(g)
@@ -460,12 +584,11 @@ def on_vote(cq, chat, target):
 def finish_vote(g):
     edit(g["chat"], g.get("vote_msg"), vote_text(g).rsplit("\n\n", 1)[0] + "\n\nГолосование закрыто.")
     x = E.resolve_vote(g)
+    caption = T.pick(T.EXECUTED, name=h(g, x), role=role_name(g, x)) if x else T.pick(T.NO_EXECUTION)
+    send_photo(g["chat"], lambda: C.verdict(g["players"], x, E.ROLE_NAMES), caption)
     if x:
-        send(g["chat"], T.pick(T.EXECUTED, name=h(g, x), role=role_name(g, x)))
         set_muted(g, x, True)
-        send(x, "⚖️ Вас казнили. Группу читать можно, писать — нет: мёртвые молчат.")
-    else:
-        send(g["chat"], T.pick(T.NO_EXECUTION))
+        send(x, "⚖️ Вас казнили. Группу читать можно, писать — нет: мёртвые молчат.", markup=REMOVE_KEYBOARD)
     save(g)
     if not check_win(g):
         start_night(g)
@@ -481,14 +604,20 @@ def roles_list(g):
 def check_win(g):
     w = E.winner(g)
     if w:
-        end_game(g, T.WIN[w])
+        end_game(g, w)
     return bool(w)
 
 
-def end_game(g, headline):
-    send(g["chat"], f"{headline}\n\n<b>Роли:</b>\n{roles_list(g)}\n\nЕщё партию? /mafia")
+def end_game(g, result):
+    """result — 'town' | 'mafia' | 'maniac' | 'draw' | 'stop'."""
+    headline = T.WIN.get(result, "⛔ <b>Партия остановлена.</b>")
+    send_photo(g["chat"], lambda: C.final(g["players"], result, E.ROLE_NAMES),
+               f"{headline}\n\n<b>Роли:</b>\n{roles_list(g)}\n\nЕщё партию? /mafia")
     for u in g.get("restricted", []):
         set_muted(g, u, False)
+    for u, p in g["players"].items():
+        if p["alive"]:  # у мёртвых кнопку уже убрали
+            send(u, f"🏁 Игра в «{html.escape(g['title'])}» окончена. Итоги — в группе.", markup=REMOVE_KEYBOARD)
     drop(g)
 
 
@@ -508,7 +637,7 @@ def stop(chat, user):
         drop(g)
         send(chat, "Набор отменён.")
     else:
-        end_game(g, "⛔ <b>Партия остановлена.</b>")
+        end_game(g, "stop")
 
 
 # ---------- Крокодил и Табу в группе ----------
@@ -660,16 +789,35 @@ def party_end(g, headline):
 # ---------- меню игр в группе ----------
 
 MENU_TEXT = ("🎲 <b>Во что играем?</b>\n\n"
-             "🎭 <b>Мафия 18+</b> — роли в личку, ночью ходы кнопками, днём голосуем. От 5 человек.\n"
-             "🐊 <b>Крокодил</b> — ведущий объясняет слово текстом, бот сам ловит правильную догадку.\n"
-             "🚫 <b>Табу</b> — то же, но нельзя говорить 5 запретных слов." + T.DEV)
+             "🎭 <b>Мафия 18+</b> — у каждого свой телефон: роль в личку, ночью ход в приложении, днём голосуем. От 5 человек.\n"
+             "🐊 <b>Крокодил</b> и 🚫 <b>Табу</b> — один телефон по кругу: карточки, таймер, счёт команд." + T.DEV)
+
+_app_check = [0.0, False]  # когда проверяли и включено ли мини-приложение бота в BotFather
+
+
+def app_link(mode):
+    """Ссылка на игру на одном телефоне сразу в нужном режиме.
+
+    Если в BotFather включено мини-приложение бота — откроется внутри Telegram (startapp),
+    иначе — та же игра в браузере. Проверяем раз в 5 минут, перезапуск не нужен.
+    """
+    if now() - _app_check[0] > 300:
+        me = safe("getMe") or {}
+        _app_check[:] = [now(), bool(me.get("has_main_web_app"))]
+    return f"https://t.me/{BOT}?startapp={mode}" if _app_check[1] else f"{APP_URL}?mode={mode}"
 
 
 def menu_rows():
-    return [[{"text": "🎭 Мафия 18+", "callback_data": "gm:mafia"},
-             {"text": "🐊 Крокодил", "callback_data": "gm:croc"},
-             {"text": "🚫 Табу", "callback_data": "gm:tabu"}],
+    return [[{"text": "🎭 Мафия 18+", "callback_data": "gm:mafia"}],
+            [{"text": "🐊 Крокодил", "url": app_link("croc")},
+             {"text": "🚫 Табу", "url": app_link("tabu")}],
             [{"text": "📜 Правила", "callback_data": "gm:rules"}]]
+
+
+def send_app_button(chat, mode):
+    name = {"croc": "🐊 Крокодил", "tabu": "🚫 Табу"}[mode]
+    send(chat, f"<b>{name}</b> — играем на одном телефоне, передавая его по кругу: карточки, таймер, счёт команд.",
+         [[{"text": f"▶️ Открыть {name[2:]}", "url": app_link(mode)}]])
 
 
 def games_menu(chat):
@@ -690,11 +838,11 @@ def menu_callback(cq, game):
     answer(cq)
     if game == "mafia":
         open_lobby(cid, title, user)
-    elif game in ("croc", "tabu"):
-        party_open(cid, title, user, game)
+    elif game in ("croc", "tabu"):  # кнопки из старых закреплённых меню
+        send_app_button(cid, game)
     elif game == "rules":
-        send(cid, T.RULES + "\n\nКрокодил и Табу: ведущий жмёт «Посмотреть слово» и объясняет текстом, "
-                            "остальные пишут догадки в чат — бот сам засчитывает правильную." + T.DEV)
+        send(cid, T.RULES + "\n\nКрокодил и Табу открываются кнопками меню: играете на одном телефоне, "
+                            "передавая его по кругу." + T.DEV)
 
 
 # ---------- таймеры ----------
@@ -730,8 +878,8 @@ def next_wait():
 
 # ---------- входящие ----------
 
-GREETING = ("👋 Я веду игры в группах, где у каждого свой телефон: <b>Мафия 18+</b> (/mafia), "
-            "<b>Крокодил</b> (/krokodil) и <b>Табу</b> (/tabu) — в них я сам засчитываю догадки из чата.\n\n"
+GREETING = ("👋 Я веду <b>Мафию 18+</b> в группах, где у каждого свой телефон, "
+            "и открываю <b>Крокодил</b> и <b>Табу</b> — их играют на одном телефоне по кругу.\n\n"
             "Добавьте меня в группу — я пришлю меню с кнопками игр (или /games). "
             "Дайте мне право закреплять сообщения — закреплю меню вверху чата. Правила Мафии — /rules.\n\n"
             "Играть всем на одном телефоне — кнопка «Играть» внизу." + T.DEV)
@@ -751,6 +899,8 @@ def on_message(m):
                 send(uid, GREETING)
         elif text.startswith("/rules"):
             send(uid, T.RULES + T.DEV)
+        elif m.get("web_app_data"):
+            on_webapp(uid, m["web_app_data"].get("data", ""))
         elif text:
             relay_mafia(uid, text)
         return
@@ -777,8 +927,12 @@ def on_message(m):
     elif cmd == "/mafia":
         open_lobby(cid, title, user)
     elif cmd in ("/krokodil", "/croc"):
-        party_open(cid, title, user, "croc")
+        send_app_button(cid, "croc")
     elif cmd == "/tabu":
+        send_app_button(cid, "tabu")
+    elif cmd == "/krokodil_chat":  # запасной текстовый режим: объясняют в чате, бот ловит догадки
+        party_open(cid, title, user, "croc")
+    elif cmd == "/tabu_chat":
         party_open(cid, title, user, "tabu")
     elif cmd == "/score":
         g = GAMES.get(cid)
@@ -786,7 +940,8 @@ def on_message(m):
     elif cmd == "/stop":
         stop(cid, user)
     elif cmd in ("/rules", "/start"):
-        send(cid, T.RULES + "\n\nЕщё игры: /krokodil и /tabu — объясняешь слово текстом, бот сам ловит правильные догадки." + T.DEV)
+        send(cid, T.RULES + "\n\nЕщё игры: /krokodil и /tabu — на одном телефоне по кругу. "
+                            "Вариант в чате (бот сам ловит догадки): /krokodil_chat, /tabu_chat." + T.DEV)
 
 
 def relay_mafia(uid, text):
@@ -894,9 +1049,8 @@ def main():
     safe("setMyCommands", scope={"type": "all_group_chats"}, commands=[
         {"command": "games", "description": "Меню игр с кнопками"},
         {"command": "mafia", "description": "Мафия 18+: открыть набор"},
-        {"command": "krokodil", "description": "Крокодил: объясняй текстом, бот ловит догадки"},
-        {"command": "tabu", "description": "Табу: объясняй без 5 запретных слов"},
-        {"command": "score", "description": "Счёт в Крокодиле/Табу"},
+        {"command": "krokodil", "description": "Крокодил: открыть игру (один телефон по кругу)"},
+        {"command": "tabu", "description": "Табу: открыть игру (один телефон по кругу)"},
         {"command": "stop", "description": "Закончить игру"},
         {"command": "rules", "description": "Правила"}])
     safe("setMyCommands", scope={"type": "all_private_chats"}, commands=[

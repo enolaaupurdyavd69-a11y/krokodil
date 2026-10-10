@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   // При изменении слов или кода — увеличить, чтобы Telegram не отдавал старое из кеша
-  const VER = '2';
+  const VER = '3';
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45'];
   const NAMES = ['Огненные лисы', 'Трезвые не будем', 'Третьи лишние', 'Ночные совы', 'Без тормозов', 'Шестое чувство'];
   const TIMES = [30, 60, 90, 120];
@@ -12,6 +12,12 @@
 
   const tg = window.Telegram && window.Telegram.WebApp;
   const inTelegram = !!(tg && tg.initData);
+  // Запуск из меню группы: ?startapp=croc|tabu (в Telegram) или ?mode=croc|tabu (в браузере)
+  const START_MODE = (() => {
+    let m = null;
+    try { m = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || new URLSearchParams(location.search).get('mode'); } catch { /* */ }
+    return m === 'croc' || m === 'tabu' ? m : null;
+  })();
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem('kroko.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
@@ -448,7 +454,7 @@
   const NEXT_MARK = { croc: { hit: 'skip', skip: 'hit' }, tabu: { hit: 'skip', skip: 'foul', foul: 'hit' } };
   const actions = {
     reload: () => location.reload(),
-    adult: () => { store.set('adult', true); go('home'); },
+    adult: () => { store.set('adult', true); openStart(); },
     minor: () => { try { if (inTelegram) return tg.close(); } catch { /* */ } go('minor'); },
     home: () => { if (screen === 'turn') pause(); stop(); keepAwake(false); go('home'); },
     rules: () => go('rules'),
@@ -563,12 +569,20 @@
     frame();
   }
 
+  // Сразу в настройки нужной игры, если пришли по кнопке из группы и нет незаконченной партии
+  function openStart() {
+    if (START_MODE && !(game && game.phase && game.phase !== 'win')) {
+      settings.mode = START_MODE; saveSettings(); setupError = ''; go('setup');
+    } else go('home');
+  }
+
   // ---------- старт ----------
   render();
   loadWords().then(() => {
     // партия из версии 1 хранила ok: true/false вместо r
     if (game && game.log) for (const x of game.log) if (!x.r) x.r = x.ok ? 'hit' : 'skip';
-    screen = store.get('adult', false) ? 'home' : 'age';
+    if (store.get('adult', false)) return openStart();
+    screen = 'age';
     render();
   }).catch(() => { screen = 'failed'; render(); });
 })();

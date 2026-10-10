@@ -49,9 +49,10 @@ class GroupFlow(unittest.TestCase):
         B.GAMES.clear()
         B.BOT = "krokodil_party_18_bot"
         self.tg = FakeTelegram()
-        B.api = self.tg
+        B.api = B.api_upload = self.tg
         self.clock = [1_000_000.0]
         B.now = lambda: self.clock[0]
+        B._app_check[:] = [0.0, False]
         self.n = 0
 
     def tearDown(self):
@@ -78,7 +79,7 @@ class GroupFlow(unittest.TestCase):
         return B.GAMES[GROUP]["scores"][str(uid)]["score"]
 
     def test_krokodil_round(self):
-        self.say(1, "/krokodil")
+        self.say(1, "/krokodil_chat")
         g = B.GAMES[GROUP]
         self.assertEqual(g["status"], "idle")
         self.press(2, f"pl:{GROUP}")
@@ -113,7 +114,7 @@ class GroupFlow(unittest.TestCase):
         self.assertIn("Счёт", self.group_text())
 
     def test_tabu_forbidden(self):
-        self.say(1, "/tabu")
+        self.say(1, "/tabu_chat")
         self.press(1, f"pl:{GROUP}")
         g = B.GAMES[GROUP]
         g["card"] = dict(POHMELYE)
@@ -124,10 +125,10 @@ class GroupFlow(unittest.TestCase):
         self.assertNotEqual(g["card"]["t"], "Похмелье", "после нарушения слово меняется")
 
     def test_one_game_per_chat_and_pass(self):
-        self.say(1, "/krokodil")
+        self.say(1, "/krokodil_chat")
         self.say(1, "/mafia")
         self.assertIn("уже идёт", self.group_text())
-        self.say(1, "/tabu")
+        self.say(1, "/tabu_chat")
         self.assertIn("уже идёт", self.group_text())
         self.press(2, f"pl:{GROUP}")
         self.press(3, f"pl:{GROUP}")
@@ -137,7 +138,7 @@ class GroupFlow(unittest.TestCase):
         self.assertIn("передаёт ход", self.group_text())
 
     def test_idle_closes(self):
-        self.say(1, "/krokodil")
+        self.say(1, "/krokodil_chat")
         self.clock[0] += B.PARTY_IDLE_SEC + 1
         B.tick()
         self.assertNotIn(GROUP, B.GAMES)
@@ -149,15 +150,16 @@ class GroupFlow(unittest.TestCase):
                               "new_chat_members": [{"id": 999, "is_bot": True, "username": "krokodil_party_18_bot"}]}})
         menu = self.tg.to(GROUP)[-1]
         self.assertIn("Во что играем", menu["text"])
-        buttons = [b["callback_data"] for row in menu["reply_markup"]["inline_keyboard"] for b in row]
-        self.assertEqual(buttons, ["gm:mafia", "gm:croc", "gm:tabu", "gm:rules"])
+        buttons = [b.get("callback_data") or b["url"] for row in menu["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertEqual(buttons, ["gm:mafia", B.APP_URL + "?mode=croc", B.APP_URL + "?mode=tabu", "gm:rules"],
+                         "без мини-приложения в BotFather — ссылки на сайт")
         pins = [p for m, p in self.tg.sent if m == "pinChatMessage"]
         self.assertEqual(len(pins), 1)
         # повторное /games: прошлое меню открепляется, новое закрепляется
         self.say(2, "/games")
         self.assertEqual([m for m, _ in self.tg.sent if m in ("unpinChatMessage", "pinChatMessage")][-2:],
                          ["unpinChatMessage", "pinChatMessage"])
-        self.press(3, "gm:croc")
+        self.say(3, "/krokodil_chat")
         self.assertEqual(B.GAMES[GROUP]["mode"], "croc")
         self.press(3, "gm:mafia")
         self.assertIn("уже идёт", self.group_text(), "кнопка не ломает идущую игру")
@@ -167,7 +169,7 @@ class GroupFlow(unittest.TestCase):
         self.assertEqual(B.GAMES[GROUP]["creator"], "4", "набор открыл нажавший кнопку")
 
     def test_survives_restart(self):
-        self.say(1, "/krokodil")
+        self.say(1, "/krokodil_chat")
         self.press(2, f"pl:{GROUP}")
         card = B.GAMES[GROUP]["card"]["t"]
         B.GAMES.clear()
