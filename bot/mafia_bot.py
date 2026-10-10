@@ -364,7 +364,9 @@ def begin(cq, chat):
             names = [f"{h(g, v)} ({role_name(g, v)})" for v in mates]
             text += ("\n\nВаша семья: " + ", ".join(names) if names else "\n\nВы работаете в одиночку.")
             text += "\nВсё, что вы пишете сюда, увидят остальные мафиози."
-        text += "\n\nКнопка «🎭 Моя роль» внизу — ваша карточка и ночной ход."
+        if p["role"] == E.WIFE and g.get("husband"):
+            text += f"\n\n💍 Ваш муж: <b>{h(g, g['husband'])}</b>. Об этом знаете только вы."
+        text += "\n\nКнопка «🎭 Моя роль» внизу — ваша карточка, ночной ход и тайное голосование."
         card = lambda p=p, mates=mates: C.role_card(  # noqa: E731 — картинка рисуется внутри send_photo
             p["role"], E.ROLE_NAMES[p["role"]], T.ROLE_PLAIN[p["role"]], T.TEAM_GOAL.get(p["role"], T.TOWN_GOAL),
             g["title"], [g["players"][v]["name"] for v in mates])
@@ -394,8 +396,14 @@ def role_keyboard(g, uid):
     data = {"c": g["chat"], "g": g["title"][:40], "r": p["role"], "n": g.get("night_no", 0),
             "m": [g["players"][v]["name"][:20] for v in mafia_alive(g) if v != uid] if E.is_mafia(g, uid) else [],
             "p": {u: [q["name"][:20], int(q["alive"])] for u, q in g["players"].items()}}
+    if p["role"] == E.WIFE and g.get("husband"):
+        data["hb"] = g["players"][g["husband"]]["name"][:20]
     if g["status"] == "night":
         data["t"] = {k: ts for u, k, ts in E.night_tasks(g) if u == uid}
+        data["dl"] = int(g["deadline"])
+    elif g["status"] == "vote" and uid in E.voters(g):
+        data["v"] = [t for t in E.alive(g) if t != uid]
+        data["d"] = g["day_no"]
         data["dl"] = int(g["deadline"])
     url = f"{MAFIA_URL}?v={APP_VER}&d={b64(data)}"
     return {"keyboard": [[{"text": "🎭 Моя роль", "web_app": {"url": url}}]],
@@ -453,6 +461,8 @@ def on_webapp(uid, raw):
     try:
         data = json.loads(raw)
         g = GAMES.get(str(data["c"]))
+        if data.get("a") == "v":
+            return webapp_vote(g, uid, data)
         acts = dict(data["acts"])
     except (ValueError, KeyError, TypeError):
         send(uid, "Не понял ход из приложения. Выберите кнопками в чате.")
@@ -464,7 +474,8 @@ def on_webapp(uid, raw):
     for kind, target in acts.items():
         ok, msg = apply_action(g, uid, str(kind), str(target))
         what = {"kill": "убить", "doncheck": "проверить", "heal": "лечить", "check": "проверить",
-                "visit": "навестить", "maniac": "навестить с топором"}.get(kind, kind)
+                "visit": "навестить", "maniac": "навестить с топором", "watch": "подглядеть за",
+                "dance": "станцевать для", "booze": "подпоить"}.get(kind, kind)
         report.append(f"{'✅' if ok else '⚠️'} {what}: <b>{h(g, str(target)) if str(target) in g['players'] else '?'}</b>"
                       + ("" if ok else f" — {msg.lower()}"))
     send(uid, "Ход из приложения:\n" + "\n".join(report))
@@ -485,9 +496,18 @@ def finish_night(g):
             send(actor, f"🎩 {h(g, target)} — " + ("<b>КОМИССАР!</b>" if ok else "не комиссар."))
     if res["blocked"] and g["players"][res["blocked"]]["alive"]:
         send(res["blocked"], T.BLOCKED)
-    lines = [T.pick(T.DEATH, name=h(g, d), role=role_name(g, d)) for d in res["dead"]]
+    if res["watch"]:
+        voyeur, target, seen = res["watch"]
+        send(voyeur, f"👀 Подглядывая за <b>{h(g, target)}</b>, вы видели: "
+                     + (", ".join(f"<b>{h(g, v)}</b>" for v in seen) if seen else "никто не приходил."))
+    if res["silenced"]:
+        send(res["silenced"], T.DANCED)
+    lines = [T.JEALOUS.format(name=h(g, d)) if d == res["jealous"]
+             else T.pick(T.DEATH, name=h(g, d), role=role_name(g, d)) for d in res["dead"]]
     if not lines:
         lines.append(T.pick(T.SAVED) if res["saved"] else T.pick(T.QUIET))
+    if res["silenced"]:
+        lines.append(T.SILENCED.format(name=h(g, res["silenced"])))
     send_photo(chat, lambda: C.morning(g["night_no"], g["players"], res["dead"], E.ROLE_NAMES, bool(res["saved"])),
                "\n\n".join(lines))
     for d in res["dead"]:
@@ -518,9 +538,9 @@ def on_tovote(cq, chat):
     if not g or g["status"] != "day":
         answer(cq, "Сейчас не день")
         return
-    a = E.alive(g)
+    a = E.voters(g)
     if uid not in a:
-        answer(cq, "Мёртвые не голосуют", alert=True)
+        answer(cq, "Мёртвые не голосуют" if uid not in E.alive(g) else "Сегодня вы не голосуете 💃", alert=True)
         return
     if uid not in g["tovote"]:
         g["tovote"].append(uid)
@@ -534,14 +554,17 @@ def on_tovote(cq, chat):
 
 
 def vote_text(g):
+    """Голосование тайное: в группе видно только, сколько человек уже проголосовало."""
+    return (f"🗳 <b>Тайное голосование.</b> Кого казним?\n\n"
+            f"Голосуйте в «🎭 Моя роль» в личке бота (или кнопками ниже — ваш выбор никто не увидит).\n\n"
+            f"Проголосовали <b>{len(g['votes'])} из {len(E.voters(g))}</b>. На голосование — {VOTE_SEC} с.")
+
+
+def tally_text(g):
+    """Итог без имён голосовавших: за кого сколько голосов."""
     count = E.tally(g)
-    voters = {}
-    for v, t in g["votes"].items():
-        voters.setdefault(t, []).append(h(g, v))
-    lines = [f"<b>{'Пропустить' if t == E.SKIP else h(g, t)}</b> — {c}: {', '.join(voters[t])}"
-             for t, c in count.most_common()]
-    body = "\n".join(lines) or "Пока никто не проголосовал."
-    return T.VOTE.format(tally=body) + f"\n\nПроголосовали {len(g['votes'])} из {len(E.alive(g))}. На голосование — {VOTE_SEC} с."
+    lines = [f"{'🤷 Пропустить' if t == E.SKIP else h(g, t)} — {c}" for t, c in count.most_common()]
+    return "Голоса: " + ("; ".join(lines) if lines else "никто не проголосовал")
 
 
 def vote_rows(g):
@@ -559,6 +582,8 @@ def start_vote(g):
     m = send(g["chat"], vote_text(g), vote_rows(g))
     g["vote_msg"] = m and m["message_id"]
     save(g)
+    for u in E.voters(g):  # обновить кнопку «Моя роль»: в ней тайное голосование
+        send(u, f"🗳 День {g['day_no']}: тайное голосование. Откройте «🎭 Моя роль» внизу.", markup=role_keyboard(g, u))
 
 
 def on_vote(cq, chat, target):
@@ -567,24 +592,42 @@ def on_vote(cq, chat, target):
     if not g or g["status"] != "vote":
         answer(cq, "Голосование закрыто")
         return
+    ok, msg = cast_vote(g, uid, target)
+    answer(cq, msg, alert=not ok)
+
+
+def cast_vote(g, uid, target):
+    """Голос из кнопки в группе или из мини-приложения. Возвращает (принят ли, текст для игрока)."""
     if uid not in E.alive(g):
-        answer(cq, "Голосуют только живые игроки", alert=True)
-        return
+        return False, "Голосуют только живые игроки"
+    if uid not in E.voters(g):
+        return False, "Сегодня вы не голосуете — после танца Стриптизёрши 💃"
     if not E.record_vote(g, uid, target):
-        answer(cq, "За себя голосовать нельзя", alert=True)
-        return
-    answer(cq, "Голос принят")
+        return False, "За себя голосовать нельзя"
     save(g)
     if E.vote_done(g):
         finish_vote(g)
     else:
-        edit(chat, g["vote_msg"], vote_text(g), vote_rows(g))
+        edit(g["chat"], g["vote_msg"], vote_text(g), vote_rows(g))
+    return True, "Голос принят. Его никто не увидит"
+
+
+def webapp_vote(g, uid, data):
+    if not g or g["status"] != "vote" or g.get("day_no") != data.get("d"):
+        send(uid, "Голосование уже закрыто.")
+        return
+    target = str(data.get("t"))
+    ok, msg = cast_vote(g, uid, target)
+    who = "пропустить" if target == E.SKIP else (h(g, target) if target in g["players"] else "?")
+    send(uid, f"{'✅' if ok else '⚠️'} Ваш голос: <b>{who}</b>" + ("" if ok else f" — {msg.lower()}"))
 
 
 def finish_vote(g):
-    edit(g["chat"], g.get("vote_msg"), vote_text(g).rsplit("\n\n", 1)[0] + "\n\nГолосование закрыто.")
+    summary = tally_text(g)
+    edit(g["chat"], g.get("vote_msg"), f"🗳 <b>Голосование закрыто.</b>\n\n{summary}")
     x = E.resolve_vote(g)
     caption = T.pick(T.EXECUTED, name=h(g, x), role=role_name(g, x)) if x else T.pick(T.NO_EXECUTION)
+    caption += f"\n\n{summary}"
     send_photo(g["chat"], lambda: C.verdict(g["players"], x, E.ROLE_NAMES), caption)
     if x:
         set_muted(g, x, True)
@@ -611,6 +654,9 @@ def check_win(g):
 def end_game(g, result):
     """result — 'town' | 'mafia' | 'maniac' | 'draw' | 'stop'."""
     headline = T.WIN.get(result, "⛔ <b>Партия остановлена.</b>")
+    if result != "stop" and E.wife_won(g):
+        wife = next(u for u, p in g["players"].items() if p["role"] == E.WIFE)
+        headline += "\n\n" + T.WIFE_WIN.format(name=h(g, wife))
     send_photo(g["chat"], lambda: C.final(g["players"], result, E.ROLE_NAMES),
                f"{headline}\n\n<b>Роли:</b>\n{roles_list(g)}\n\nЕщё партию? /mafia")
     for u in g.get("restricted", []):

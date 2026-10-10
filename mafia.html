@@ -70,14 +70,21 @@
     don:     ['🎩', 'Дон мафии', '#ffb547', 'Голосуете с семьёй за убийство, при равенстве решает ваш голос. Каждую ночь можете проверить одного игрока: не комиссар ли он.'],
     doctor:  ['💉', 'Доктор', '#3ddc97', 'Ночью лечите одного игрока — если на него нападут, он выживет. Одного и того же два раза подряд нельзя, себя — только один раз за игру.'],
     sheriff: ['🚓', 'Комиссар', '#2aabee', 'Каждую ночь проверяете одного игрока: мафия он или нет. Днём решайте сами, выдавать себя или нет.'],
-    lover:   ['💋', 'Любовница', '#ff4fa3', 'Ночью заглядываете к одному игроку. Ему становится не до дел: его ночное действие не срабатывает.'],
+    lover:   ['💋', 'Путана', '#ff4fa3', 'Ночью «обслуживаете» одного игрока — ему не до дел: его ночное действие срывается. Мужа Ревнивой жены лучше не трогать.'],
+    voyeur:  ['👀', 'Вуайерист', '#5ed6d6', 'Ночью подглядываете за одним игроком и узнаёте, кто к нему приходил.'],
+    stripper:['💃', 'Стриптизёрша', '#f06292', 'Ночью танцуете для одного игрока — днём он так впечатлён, что не может голосовать.'],
+    wife:    ['💍', 'Ревнивая жена', '#ffd666', 'У вас тайный муж. Если к нему ночью заглянет Путана — вы с ней расправитесь. Играете за себя.'],
+    bartender:['🍸', 'Бармен', '#e65050', 'Вы в мафии. Ночью подпаиваете игрока: у пьяного Комиссара проверка лжёт, пьяный Доктор никого не вылечит.'],
     maniac:  ['🪓', 'Маньяк', '#ff7a45', 'Играете сам за себя. Каждую ночь убиваете одного игрока. Побеждаете, если останетесь один на один с мирным.'],
     civil:   ['🙂', 'Мирный житель', '#b388ff', 'Ночью спите. Днём ищете мафию и голосуете с умом.'],
   };
   const GOALS = { mafia: 'Цель: мафии должно стать не меньше, чем остальных.', don: 'Цель: мафии должно стать не меньше, чем остальных.',
-                  maniac: 'Цель: остаться в живых последним, не считая одного мирного.' };
+                  maniac: 'Цель: остаться в живых последним, не считая одного мирного.',
+                  bartender: 'Цель: мафии должно стать не меньше, чем остальных.',
+                  wife: 'Цель: дожить до конца вместе с мужем — тогда вы побеждаете при любом исходе.' };
   const TASKS = { kill: '🔪 Кого семья убирает?', doncheck: '🎩 Кого проверить: не комиссар ли?', heal: '💉 Кого лечите?',
-                  check: '🚓 Кого проверяете?', visit: '💋 К кому заглянете?', maniac: '🪓 К кому зайти с топором?' };
+                  check: '🚓 Кого проверяете?', visit: '💋 К кому заглянете?', maniac: '🪓 К кому зайти с топором?',
+                  watch: '👀 За кем подглядываете?', dance: '💃 Для кого танцуете?', booze: '🍸 Кого подпаиваете?' };
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45', '#5ed6d6', '#f06292'];
   const app = document.getElementById('app');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -107,6 +114,12 @@
   const tasks = data.t || {};
   const chosen = {};
   const nightOpen = () => data.dl && Date.now() / 1000 < data.dl && Object.keys(tasks).length > 0;
+  const voteOpen = () => data.v && data.dl && Date.now() / 1000 < data.dl;
+  let vote = null;
+  const avatarBtn = (attr, uid, on) => `
+    <button class="target ${on ? 'on' : ''}" ${attr}>
+      <span class="av" style="background:${uid === 'skip' ? '#3a2d5c' : colorOf(uid)}">${uid === 'skip' ? '🤷' : initial(uid)}</span>
+      <span class="nm">${uid === 'skip' ? 'Пропустить' : esc(nameOf(uid))}</span></button>`;
 
   function render() {
     const open = nightOpen();
@@ -121,6 +134,7 @@
         <p>${about}</p>
         <p class="goal">${GOALS[data.r] || 'Цель: вычислить и казнить всю мафию и маньяка.'}</p>
         ${data.m && data.m.length ? `<p class="mates">Ваша семья: ${data.m.map(esc).join(', ')}</p>` : ''}
+        ${data.hb ? `<p class="mates">💍 Ваш муж: ${esc(data.hb)}</p>` : ''}
       </section>
       ${open ? `
       <section class="night">
@@ -133,6 +147,13 @@
                 <span class="nm">${esc(nameOf(uid))}</span></button>`).join('')}</div></div>`).join('')}
         <button class="send" id="send" ${ready ? '' : 'disabled'}>${ready ? 'Отправить ход' : 'Выберите цель'}</button>
         <p class="muted small" id="err"></p>
+      </section>` : voteOpen() ? `
+      <section class="night">
+        <div class="night-head"><h2>Тайное голосование</h2><span class="timer" id="left">${mmss(left)}</span></div>
+        <p class="muted small">Кого казним? Ваш выбор не увидит никто — в группе только счётчик.</p>
+        <div class="targets">${data.v.concat('skip').map(uid => avatarBtn(`data-vote="${esc(uid)}"`, uid, vote === uid)).join('')}</div>
+        <button class="send" id="sendVote" ${vote ? '' : 'disabled'}>${vote ? 'Проголосовать' : 'Выберите, за кого'}</button>
+        <p class="muted small" id="err"></p>
       </section>` : `
       <p class="note">${data.dl && Object.keys(tasks).length ? '⏰ Эта ночь уже закончилась — смотрите, что случилось, в группе.'
           : data.n ? '😴 Сейчас ваш ход не нужен. Днём обсуждаем и голосуем в группе.' : 'Партия начинается — первая ночь вот-вот наступит.'}</p>`}
@@ -144,6 +165,21 @@
   }
 
   app.addEventListener('click', e => {
+    const vb = e.target.closest('[data-vote]');
+    if (vb) {
+      vote = vb.dataset.vote;
+      try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch { /* */ }
+      return render();
+    }
+    if (e.target.id === 'sendVote') {
+      try {
+        if (!tg || !tg.initData) throw new Error('не в Telegram');
+        tg.sendData(JSON.stringify({ a: 'v', c: data.c, d: data.d, t: vote }));
+      } catch {
+        document.getElementById('err').textContent = 'Не удалось отправить отсюда. Проголосуйте кнопками в группе.';
+      }
+      return;
+    }
     const t = e.target.closest('.target');
     if (t) {
       chosen[t.dataset.k] = t.dataset.t;

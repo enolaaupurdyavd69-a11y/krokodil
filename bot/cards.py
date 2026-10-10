@@ -18,6 +18,8 @@ PINK, AMBER, OK, BAD, BLUE, VIOLET = (255, 79, 163), (255, 181, 71), (61, 220, 1
 ROLE_STYLE = {  # иконка и цвет роли
     "mafia": ("🔪", BAD), "don": ("🎩", AMBER), "doctor": ("💉", OK), "sheriff": ("🚓", BLUE),
     "lover": ("💋", PINK), "maniac": ("🪓", (255, 122, 69)), "civil": ("🙂", VIOLET),
+    "voyeur": ("👀", (94, 214, 214)), "stripper": ("💃", (240, 98, 146)), "wife": ("💍", (255, 214, 102)),
+    "bartender": ("🍸", (230, 80, 80)),
 }
 AVATAR_COLORS = [PINK, AMBER, BLUE, OK, VIOLET, (255, 122, 69), (94, 214, 214), (240, 98, 146)]
 
@@ -120,7 +122,10 @@ def board(im, top, players, reveal_all=False, mark=(), role_names=None):
         if dead or reveal_all:
             icon, color = ROLE_STYLE[p["role"]]
             emoji(im, (x + 122, y + 82), icon, 26)
-            text(d, (x + 142, y + 82), role_names[p["role"]], 24, fill=color, kind="regular", anchor="lm")
+            label, size = role_names[p["role"]], 24
+            while font(size, "regular").getlength(label) > tw - 156 and size > 16:  # длинная роль — мельче шрифт
+                size -= 1
+            text(d, (x + 142, y + 82), label, size, fill=color, kind="regular", anchor="lm")
         else:
             text(d, (x + 108, y + 82), "в игре", 24, fill=OK, kind="regular", anchor="lm")
     rows = (len(players) + cols - 1) // cols

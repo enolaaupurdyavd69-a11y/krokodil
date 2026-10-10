@@ -26,11 +26,11 @@ class Engine(unittest.TestCase):
         for n in range(E.MIN_PLAYERS, E.MAX_PLAYERS + 1):
             plan = Counter(E.role_plan(n))
             self.assertEqual(sum(plan.values()), n)
-            mafia = plan[E.MAFIA] + plan[E.DON]
+            mafia = plan[E.MAFIA] + plan[E.DON] + plan[E.BARTENDER]
             self.assertLess(mafia, n - mafia, f"мафии не должно быть поровну с городом на старте, n={n}")
-            self.assertEqual(plan[E.LOVER], 1 if n >= 7 else 0)
-            self.assertEqual(plan[E.MANIAC], 1 if n >= 9 else 0)
-            self.assertEqual(plan[E.DON], 1 if n >= 7 else 0)
+            for role, need in ((E.LOVER, 7), (E.VOYEUR, 8), (E.MANIAC, 9), (E.STRIPPER, 10),
+                               (E.WIFE, 11), (E.BARTENDER, 12), (E.DON, 7)):
+                self.assertEqual(plan[role], 1 if n >= need else 0, f"{role} при n={n}")
         with self.assertRaises(ValueError):
             E.role_plan(4)
 
@@ -91,6 +91,63 @@ class Engine(unittest.TestCase):
         res = E.resolve_night(st)
         self.assertEqual(res["dead"], ["7"])
         self.assertEqual(res["saved"], ["8"])
+
+    def test_stripper_silences_vote(self):
+        st = make([E.MAFIA, E.DOCTOR, E.SHERIFF, E.STRIPPER, E.CIVIL, E.CIVIL])
+        E.start_night(st)
+        E.record_action(st, "4", E.DANCE, "5")
+        res = E.resolve_night(st)
+        self.assertEqual(res["silenced"], "5")
+        E.start_vote(st)
+        self.assertFalse(E.record_vote(st, "5", "1"), "после танца не голосует")
+        for v in "1234" + "6":
+            E.record_vote(st, v, E.SKIP)
+        self.assertTrue(E.vote_done(st), "голосование не ждёт молчащего")
+        E.start_night(st)
+        self.assertNotIn("5", [u for u in E.alive(st) if u not in E.voters(st)], "запрет только на один день")
+
+    def test_voyeur_sees_visitors(self):
+        st = make([E.DON, E.MAFIA, E.DOCTOR, E.SHERIFF, E.LOVER, E.VOYEUR, E.CIVIL, E.CIVIL])
+        E.start_night(st)
+        E.record_action(st, "1", E.KILL, "7")
+        E.record_action(st, "3", E.HEAL, "7")
+        E.record_action(st, "5", E.VISIT, "8")
+        E.record_action(st, "6", E.WATCH, "7")
+        res = E.resolve_night(st)
+        voyeur, target, seen = res["watch"]
+        self.assertEqual((voyeur, target), ("6", "7"))
+        self.assertEqual(set(seen), {"1", "3"}, "видно мафиози и доктора, Путана была у другого")
+
+    def test_jealous_wife_kills_lover(self):
+        st = make([E.DON, E.MAFIA, E.DOCTOR, E.SHERIFF, E.LOVER, E.WIFE, E.CIVIL, E.CIVIL])
+        st["husband"] = "7"
+        E.start_night(st)
+        E.record_action(st, "5", E.VISIT, "7")
+        res = E.resolve_night(st)
+        self.assertEqual(res["dead"], ["5"])
+        self.assertEqual(res["jealous"], "5")
+        self.assertFalse(st["players"]["5"]["alive"])
+
+    def test_wife_wins_with_husband(self):
+        st = make([E.MAFIA, E.DOCTOR, E.SHERIFF, E.WIFE, E.CIVIL])
+        st["husband"] = "5"
+        self.assertTrue(E.wife_won(st))
+        st["players"]["5"]["alive"] = False
+        self.assertFalse(E.wife_won(st))
+
+    def test_bartender_fools_sheriff_and_doctor(self):
+        st = make([E.DON, E.BARTENDER, E.MAFIA, E.DOCTOR, E.SHERIFF, E.CIVIL, E.CIVIL, E.CIVIL, E.CIVIL, E.CIVIL])
+        E.start_night(st)
+        E.record_action(st, "2", E.BOOZE, "5")       # пьяный комиссар
+        E.record_action(st, "5", E.CHECK, "1")        # проверяет дона
+        res = E.resolve_night(st)
+        self.assertIn(("5", "1", E.CHECK, False), res["checks"], "пьяному дон кажется мирным")
+        E.start_night(st)
+        E.record_action(st, "2", E.BOOZE, "4")       # пьяный доктор
+        E.record_action(st, "1", E.KILL, "6")
+        E.record_action(st, "4", E.HEAL, "6")
+        res = E.resolve_night(st)
+        self.assertEqual(res["dead"], ["6"], "пьяный доктор не вылечил")
 
     def test_vote(self):
         st = make([E.MAFIA, E.DOCTOR, E.SHERIFF, E.CIVIL, E.CIVIL])
@@ -346,6 +403,28 @@ class BotFlow(unittest.TestCase):
         B.handle({"message": {"chat": {"id": int(don), "type": "private"}, "from": {"id": int(don)},
                               "web_app_data": {"data": json.dumps({"a": "n", "c": GROUP, "n": 0, "acts": {}})}}})
         self.assertIn("закончилась", self.tg.to(don)[-1]["text"])
+
+    def test_secret_vote_via_app(self):
+        g = self.lobby(5)
+        self.press(1, f"begin:{GROUP}", GROUP)
+        self.clock[0] += B.NIGHT_SEC + 1
+        B.tick()                                # ночь без ходов
+        g = B.GAMES[GROUP]
+        for u in E.alive(g):
+            self.press(u, f"tv:{GROUP}", GROUP)
+            if g["status"] != "day":
+                break
+        self.assertEqual(g["status"], "vote")
+        voter, target = E.alive(g)[0], E.alive(g)[1]
+        url, data = self.keyboard_data(voter)
+        self.assertIn(target, data["v"])
+        B.handle({"message": {"chat": {"id": int(voter), "type": "private"}, "from": {"id": int(voter)},
+                              "web_app_data": {"data": json.dumps({"a": "v", "c": GROUP, "d": g["day_no"], "t": target})}}})
+        self.assertEqual(g["votes"][voter], target)
+        group_texts = " ".join(p["text"] for m, p in self.tg.sent
+                               if m in ("sendMessage", "editMessageText") and str(p["chat_id"]) == GROUP)
+        self.assertIn("Проголосовали <b>1 из", group_texts)
+        self.assertNotIn(g["players"][voter]["name"] + "</b> —", group_texts, "кто за кого — не видно")
 
     def test_krokodil_opens_app(self):
         self.msg(GROUP, "supergroup", 1, "/krokodil", "Пятница")

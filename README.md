@@ -56,6 +56,7 @@ python -m http.server 8765
 | `bot/party_engine.py` | Крокодил/Табу в группе: словари (общие с сайтом), проверка догадок и нарушений |
 | `bot/cards.py` | картинки Мафии (Pillow): ночь, утро с табло города, приговор, финал, карточка роли |
 | `bot/texts.py` | тексты 18+ |
+| `bot/simulate.py` | симуляция партии виртуальными игроками → HTML-отчёт: `python -X utf8 bot/simulate.py --players 12` |
 | `bot/test_mafia.py`, `bot/test_party.py` | тесты: `cd bot && python -X utf8 -m unittest test_mafia test_party` |
 | `bot/install_task.ps1` | автозапуск: задача Планировщика `KrokodilMafiaBot` |
 
