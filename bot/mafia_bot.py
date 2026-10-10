@@ -32,7 +32,7 @@ except ImportError:
 
 APP_URL = "https://enolaaupurdyavd69-a11y.github.io/krokodil/"
 MAFIA_URL = APP_URL + "mafia.html"
-APP_VER = "3"  # меняется вместе с VER в app.js — сбрасывает кеш Telegram
+APP_VER = "4"  # меняется вместе с mafia.html — сбрасывает кеш Telegram
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -422,7 +422,8 @@ def begin(cq, chat):
     roles = Counter(p["role"] for p in g["players"].values())
     lineup = ", ".join(f"{E.ROLE_NAMES[r]}{f' ×{c}' if c > 1 else ''}" for r, c in roles.items())
     edit(chat, g["msg"], f"🎭 <b>Мафия 18+ — игра началась!</b>\n\nИгроков: {n}.\nВ городе: {lineup}.\n"
-                         "Роли пришли в личку. Мёртвые молчат.")
+                         "Роли пришли в личку бота. Играем в приложении: личка бота → кнопка «🎭 Игра». Мёртвые молчат.",
+         [[{"text": "🎭 Открыть игру", "url": f"https://t.me/{BOT}"}]])
     failed = []
     for u, p in g["players"].items():
         text = (f"Ваша роль в игре «{html.escape(g['title'])}»:\n\n{T.ROLE_INFO[p['role']]}\n\n"
@@ -435,7 +436,7 @@ def begin(cq, chat):
             text += "\nВсё, что вы пишете сюда, увидят остальные мафиози."
         if p["role"] == E.WIFE and g.get("husband"):
             text += f"\n\n💍 Ваш муж: <b>{h(g, g['husband'])}</b>. Об этом знаете только вы."
-        text += "\n\nКнопка «🎭 Моя роль» внизу — ваша карточка, ночной ход и тайное голосование."
+        text += "\n\n" + GAME_LINK
         card = lambda p=p, mates=mates: C.role_card(  # noqa: E731 — картинка рисуется внутри send_photo
             p["role"], E.ROLE_NAMES[p["role"]], T.ROLE_PLAIN[p["role"]], T.TEAM_GOAL.get(p["role"], T.TOWN_GOAL),
             g["title"], [g["players"][v]["name"] for v in mates])
@@ -458,25 +459,71 @@ def b64(obj):
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def role_keyboard(g, uid):
-    """Постоянная кнопка «🎭 Моя роль» в личке. Всё нужное странице — прямо в ссылке:
-    ПК в интернет не открываем, ход возвращается боту через Telegram (sendData)."""
+def app_data(g, uid):
+    """Снимок партии глазами игрока: фаза, табло (роли погибших открыты), события, его ход и заметки."""
     p = g["players"][uid]
-    data = {"c": g["chat"], "g": g["title"][:40], "r": p["role"], "n": g.get("night_no", 0),
+    st = "end" if g.get("result") else g["status"]
+    data = {"c": g["chat"], "g": g["title"][:40], "me": uid, "r": p["role"], "st": st,
+            "n": g.get("night_no", 0), "d": g.get("day_no", 0),
             "m": [g["players"][v]["name"][:20] for v in mafia_alive(g) if v != uid] if E.is_mafia(g, uid) else [],
-            "p": {u: [q["name"][:20], int(q["alive"])] for u, q in g["players"].items()}}
+            "p": {u: [q["name"][:20], int(q["alive"])] + ([q["role"]] if not q["alive"] or st == "end" else [])
+                  for u, q in g["players"].items()}}
     if p["role"] == E.WIFE and g.get("husband"):
         data["hb"] = g["players"][g["husband"]]["name"][:20]
-    if g["status"] == "night":
+    if g.get("events"):
+        data["ev"] = g["events"][-2:]
+    notes = g.get("notes", {}).get(uid)
+    if notes:
+        data["nt"] = notes
+    if st == "end":
+        data["w"] = g["result"]
+        data["ww"] = int(g["result"] != "stop" and E.wife_won(g))
+    elif st == "night" and p["alive"]:
         data["t"] = {k: ts for u, k, ts in E.night_tasks(g) if u == uid}
         data["dl"] = int(g["deadline"])
-    elif g["status"] == "vote" and uid in E.voters(g):
-        data["v"] = [t for t in E.alive(g) if t != uid]
-        data["d"] = g["day_no"]
+    elif st == "vote":
+        if uid in E.voters(g):
+            data["v"] = [t for t in E.alive(g) if t != uid]
         data["dl"] = int(g["deadline"])
-    url = f"{MAFIA_URL}?v={APP_VER}&d={b64(data)}"
-    return {"keyboard": [[{"text": "🎭 Моя роль", "web_app": {"url": url}}]],
+    elif st == "day":
+        data["dl"] = int(g["deadline"])
+    return data
+
+
+def role_keyboard(g, uid):
+    """Постоянная кнопка «🎭 Игра» в личке. Вся партия глазами игрока — прямо в ссылке:
+    ПК в интернет не открываем, ход возвращается боту через Telegram (sendData).
+    На каждой фазе бот присылает сообщение с обновлённой кнопкой."""
+    url = f"{MAFIA_URL}?v={APP_VER}&d={b64(app_data(g, uid))}"
+    return {"keyboard": [[{"text": "🎭 Игра", "web_app": {"url": url}}]],
             "resize_keyboard": True, "is_persistent": True}
+
+
+def push(g, text, who=None):
+    """Сообщение в личку людям партии с обновлённой кнопкой «🎭 Игра»."""
+    for u in (who if who is not None else g["players"]):
+        if not is_bot(u):
+            send(u, text, markup=role_keyboard(g, u))
+
+
+def note(g, uid, text):
+    """Личная заметка игрока за эту ночь — видна в приложении."""
+    if not is_bot(uid):
+        g.setdefault("notes", {}).setdefault(uid, []).append(text)
+
+
+def event_text(g, e):
+    """Короткий пересказ события для сообщения в личку."""
+    if e["k"] == "n":
+        if e["dead"]:
+            return "погибли: " + ", ".join(f"{nm(g, d)} ({role_name(g, d)})" for d in e["dead"])
+        return "Доктор успел — все живы" if e["sv"] else "ночь прошла спокойно — все живы"
+    if e["x"]:
+        return f"казнили {nm(g, e['x'])} ({role_name(g, e['x'])})"
+    return "никого не казнили"
+
+
+GAME_LINK = "Вся партия — в кнопке «🎭 Игра» внизу чата: ночной ход, новости утра, тайное голосование, итоги."
 
 
 def start_night(g):
@@ -490,9 +537,21 @@ def start_night(g):
     send_photo(g["chat"], lambda: C.night(g["night_no"], len(E.alive(g))),
                T.pick(T.NIGHT, n=g["night_no"]) + f"\n\nНа ход — {NIGHT_SEC} с.")
     tasks = E.night_tasks(g)
-    for u in dict.fromkeys(t[0] for t in tasks):  # обновить кнопку «Моя роль»: в ней ночной выбор
-        send(u, f"🌙 Ночь {g['night_no']} — ваш ход. Удобнее всего — кнопка «🎭 Моя роль» внизу. "
-                "Или выберите кнопками ниже.", markup=role_keyboard(g, u))
+    actors = set(t[0] for t in tasks)
+    last = (g.get("events") or [None])[-1]
+    head = f"⚖️ Приговор: {event_text(g, last)}.\n" if last and last["k"] == "v" and last["d"] == g["day_no"] else ""
+    for u in g["players"]:
+        if is_bot(u):
+            continue
+        if last and last["k"] == "v" and last.get("x") == u:
+            text = f"{head}⚖️ Вас казнили. Теперь вы зритель: следите за партией в «🎭 Игра»."
+        elif u in actors:
+            text = f"{head}🌙 Ночь {g['night_no']} — ваш ход: откройте «🎭 Игра» внизу (или кнопки ниже)."
+        elif g["players"][u]["alive"]:
+            text = f"{head}🌙 Ночь {g['night_no']}. Вы спите — утром новости в «🎭 Игра»."
+        else:
+            text = f"{head}🌙 Ночь {g['night_no']}. Вы зритель — следите за партией в «🎭 Игра»."
+        send(u, text, markup=role_keyboard(g, u))
     for u, kind, targets in tasks:
         m = send(u, T.PROMPTS[kind].format(n=g["night_no"]), target_rows(g, f"n:{g['chat']}:{kind}", targets))
         if m:
@@ -560,19 +619,22 @@ def finish_night(g):
             edit(key.split(":")[0], mid, "⏰ Время вышло, ход пропущен.")
     res = E.resolve_night(g)
     bot_learn(g, res)
+    g["notes"] = {}
     for actor, target, kind, ok in res["checks"]:
         if kind == E.CHECK:
-            send(actor, f"🕵️ {h(g, target)} — " + ("<b>МАФИЯ!</b>" if ok else "не мафия."))
+            note(g, actor, f"🕵️ Проверка: {nm(g, target)} — " + ("МАФИЯ!" if ok else "не мафия."))
         else:
-            send(actor, f"🎩 {h(g, target)} — " + ("<b>КОМИССАР!</b>" if ok else "не комиссар."))
+            note(g, actor, f"🎩 Проверка: {nm(g, target)} — " + ("КОМИССАР!" if ok else "не комиссар."))
     if res["blocked"] and g["players"][res["blocked"]]["alive"]:
-        send(res["blocked"], T.BLOCKED)
+        note(g, res["blocked"], "💋 Ночью к вам заглянула Путана — если у вас был ночной ход, он сорвался.")
     if res["watch"]:
         voyeur, target, seen = res["watch"]
-        send(voyeur, f"👀 Подглядывая за <b>{h(g, target)}</b>, вы видели: "
-                     + (", ".join(f"<b>{h(g, v)}</b>" for v in seen) if seen else "никто не приходил."))
+        note(g, voyeur, f"👀 Подглядывая за {nm(g, target)}, вы видели: "
+                        + (", ".join(nm(g, v) for v in seen) if seen else "никто не приходил."))
     if res["silenced"]:
-        send(res["silenced"], T.DANCED)
+        note(g, res["silenced"], "💃 Вам станцевала Стриптизёрша — сегодня вы не голосуете.")
+    g.setdefault("events", []).append({"k": "n", "n": g["night_no"], "dead": res["dead"], "jl": res["jealous"],
+                                       "sv": bool(res["saved"]), "sl": res["silenced"]})
     lines = [T.JEALOUS.format(name=h(g, d)) if d == res["jealous"]
              else T.pick(T.DEATH, name=h(g, d), role=role_name(g, d)) for d in res["dead"]]
     if not lines:
@@ -583,7 +645,6 @@ def finish_night(g):
                "\n\n".join(lines))
     for d in res["dead"]:
         set_muted(g, d, True)
-        send(d, "☠️ Вас убили этой ночью. Группу читать можно, писать — нет: мёртвые молчат.", markup=REMOVE_KEYBOARD)
     save(g)
     if not check_win(g):
         start_day(g)
@@ -603,6 +664,15 @@ def start_day(g):
              [[{"text": "🗳 К голосованию", "callback_data": f"tv:{g['chat']}"}]])
     g["day_msg"] = m and m["message_id"]
     save(g)
+    e = g["events"][-1] if g.get("events") else None
+    if e and e["k"] == "n":
+        for u in g["players"]:
+            if is_bot(u):
+                continue
+            me = "☠️ Вас убили этой ночью — теперь вы зритель.\n" if u in e["dead"] else ""
+            extra = " Есть новости лично для вас." if g.get("notes", {}).get(u) else ""
+            send(u, f"{me}🌅 Утро {g['day_no']}: {event_text(g, e)}.{extra} Подробности и табло — «🎭 Игра».",
+                 markup=role_keyboard(g, u))
 
 
 def on_tovote(cq, chat):
@@ -632,7 +702,7 @@ def on_tovote(cq, chat):
 def vote_text(g):
     """Голосование тайное: в группе видно только, сколько человек уже проголосовало."""
     return (f"🗳 <b>Тайное голосование.</b> Кого казним?\n\n"
-            f"Голосуйте в «🎭 Моя роль» в личке бота (или кнопками ниже — ваш выбор никто не увидит).\n\n"
+            f"Голосуйте в «🎭 Игра» в личке бота (или кнопками ниже — ваш выбор никто не увидит).\n\n"
             f"Проголосовали <b>{len(g['votes'])} из {len(E.voters(g))}</b>. На голосование — {VOTE_SEC} с.")
 
 
@@ -661,8 +731,7 @@ def start_vote(g):
     m = send(g["chat"], vote_text(g), vote_rows(g))
     g["vote_msg"] = m and m["message_id"]
     save(g)
-    for u in E.voters(g):  # обновить кнопку «Моя роль»: в ней тайное голосование
-        send(u, f"🗳 День {g['day_no']}: тайное голосование. Откройте «🎭 Моя роль» внизу.", markup=role_keyboard(g, u))
+    push(g, f"🗳 День {g['day_no']}: тайное голосование — откройте «🎭 Игра» внизу.", E.voters(g))
 
 
 def on_vote(cq, chat, target):
@@ -707,13 +776,14 @@ def webapp_vote(g, uid, data):
 def finish_vote(g):
     summary = tally_text(g)
     edit(g["chat"], g.get("vote_msg"), f"🗳 <b>Голосование закрыто.</b>\n\n{summary}")
+    tally = [[t, c] for t, c in E.tally(g).most_common()]
     x = E.resolve_vote(g)
+    g.setdefault("events", []).append({"k": "v", "d": g["day_no"], "x": x, "ty": tally})
     caption = T.pick(T.EXECUTED, name=h(g, x), role=role_name(g, x)) if x else T.pick(T.NO_EXECUTION)
     caption += f"\n\n{summary}"
     send_photo(g["chat"], lambda: C.verdict(g["players"], x, E.ROLE_NAMES), caption)
     if x:
         set_muted(g, x, True)
-        send(x, "⚖️ Вас казнили. Группу читать можно, писать — нет: мёртвые молчат.", markup=REMOVE_KEYBOARD)
     save(g)
     if not check_win(g):
         start_night(g)
@@ -1177,6 +1247,7 @@ def check_win(g):
 
 def end_game(g, result):
     """result — 'town' | 'mafia' | 'maniac' | 'draw' | 'stop'."""
+    g["result"] = result
     headline = T.WIN.get(result, "⛔ <b>Партия остановлена.</b>")
     if result != "stop" and E.wife_won(g):
         wife = next(u for u, p in g["players"].items() if p["role"] == E.WIFE)
@@ -1185,9 +1256,9 @@ def end_game(g, result):
                f"{headline}\n\n<b>Роли:</b>\n{roles_list(g)}\n\nЕщё партию? /mafia")
     for u in g.get("restricted", []):
         set_muted(g, u, False)
-    for u, p in g["players"].items():
-        if p["alive"]:  # у мёртвых кнопку уже убрали
-            send(u, f"🏁 Игра в «{html.escape(g['title'])}» окончена. Итоги — в группе.", markup=REMOVE_KEYBOARD)
+    last = (g.get("events") or [None])[-1]
+    news = f" Последнее: {event_text(g, last)}." if last else ""
+    push(g, f"🏁 Игра в «{html.escape(g['title'])}» окончена.{news} Кто победил и все роли — «🎭 Игра».")
     drop(g)
 
 

@@ -555,6 +555,39 @@ class BotFlow(unittest.TestCase):
         replies = self.tg.to(GROUP)[n:]
         self.assertTrue(replies and name in replies[0]["text"], "обвинённый бот отвечает в чате")
 
+    def test_whole_game_in_app(self):
+        """Каждая фаза приходит людям в личку с обновлённой кнопкой «🎭 Игра»: утро, приговор, финал."""
+        g = self.lobby(5)
+        self.press(1, f"begin:{GROUP}", GROUP)
+        url, data = self.keyboard_data(1)
+        self.assertEqual((data["st"], data["me"]), ("night", "1"))
+        self.clock[0] += B.NIGHT_SEC + 1
+        B.tick()                                   # ночь без ходов → утро
+        url, data = self.keyboard_data(2)
+        self.assertEqual(data["st"], "day")
+        self.assertEqual(data["ev"][-1]["k"], "n", "в приложении — новости утра")
+        self.assertIn("Утро 1", self.tg.to(2)[-1]["text"])
+        victim = E.alive(g)[0]
+        for u in E.alive(g):
+            self.press(u, f"tv:{GROUP}", GROUP)
+            if g["status"] != "day":
+                break
+        for u in E.voters(g):
+            self.press(u, f"v:{GROUP}:{victim if u != victim else E.SKIP}", GROUP)
+            if GROUP not in B.GAMES or g["status"] != "vote":
+                break
+        if GROUP in B.GAMES:
+            url, data = self.keyboard_data(victim)
+            self.assertEqual(data["ev"][-1], {"k": "v", "d": 1, "x": victim, "ty": data["ev"][-1]["ty"]})
+            self.assertEqual(data["p"][victim][2], g["players"][victim]["role"], "роль казнённого открыта")
+            self.assertIn("Вас казнили", self.tg.to(victim)[-1]["text"])
+            self.press(1, f"tv:{GROUP}", GROUP)
+            self.msg(GROUP, "supergroup", 1, "/stop")
+        url, data = self.keyboard_data(3)
+        self.assertEqual(data["st"], "end")
+        self.assertTrue(all(len(v) == 3 for v in data["p"].values()), "в финале раскрыты все роли")
+        self.assertIn("окончена", self.tg.to(3)[-1]["text"])
+
     def test_dead_cannot_vote(self):
         g = self.lobby(5)
         self.press(1, f"begin:{GROUP}", GROUP)

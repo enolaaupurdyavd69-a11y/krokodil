@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="theme-color" content="#140f1f">
-  <title>Мафия 18+ — моя роль</title>
+  <title>Мафия 18+</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;800&family=Manrope:wght@400;600;700&display=swap">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -12,8 +12,8 @@
     :root {
       color-scheme: dark;
       --ground: #140f1f; --screen: #1d1530; --raise: #2a1f44; --line: #3a2d5c;
-      --fg: #f3eefc; --muted: #a99cc6; --pink: #ff4fa3; --amber: #ffb547; --ok: #3ddc97; --bad: #ff6b6b;
-      --role: var(--pink);
+      --fg: #f3eefc; --muted: #a99cc6; --pink: #ff4fa3; --amber: #ffb547; --ok: #3ddc97; --bad: #ff6b6b; --blue: #2aabee;
+      --role: var(--pink); --hero: var(--pink);
       --display: "Unbounded", "Arial Black", system-ui, sans-serif;
       --body: "Manrope", "Segoe UI", system-ui, sans-serif;
     }
@@ -27,36 +27,77 @@
     .muted { color: var(--muted); }
     .small { font-size: 13px; }
 
-    .card { position: relative; overflow: hidden; border-radius: 24px; padding: 24px 20px; text-align: center;
-            background: radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--role) 30%, transparent), transparent 60%), var(--raise);
-            border: 1px solid color-mix(in srgb, var(--role) 50%, var(--line)); display: grid; gap: 10px; justify-items: center; }
-    .icon { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 60px;
-            background: color-mix(in srgb, var(--role) 22%, var(--ground)); border: 3px solid var(--role); }
-    .card h1 { font-size: 30px; color: var(--role); }
+    .top { display: flex; justify-content: space-between; align-items: end; gap: 12px; }
+    .top h1 { font-size: 24px; }
+    .timer { font-family: var(--display); font-variant-numeric: tabular-nums; color: var(--pink); font-size: 18px; white-space: nowrap; }
+    .timer.over { color: var(--muted); }
+
+    /* главное событие фазы */
+    .hero { border-radius: 24px; padding: 22px 18px; display: grid; gap: 12px; text-align: center; justify-items: center;
+            background: radial-gradient(120% 90% at 50% -20%, color-mix(in srgb, var(--hero) 32%, transparent), transparent 62%), var(--raise);
+            border: 1px solid color-mix(in srgb, var(--hero) 45%, var(--line)); animation: rise .5s cubic-bezier(.2,.8,.2,1) both; }
+    .hero .big { font-size: 56px; line-height: 1; animation: pop .6s .1s cubic-bezier(.2,1.4,.4,1) both; }
+    .hero h2 { font-size: 22px; color: var(--hero); }
+    .people { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+    .person { display: grid; justify-items: center; gap: 6px; width: 92px; animation: rise .5s both; }
+    .person .av { width: 60px; height: 60px; font-size: 24px; position: relative; }
+    .person .av::after { content: '💀'; position: absolute; right: -6px; bottom: -6px; font-size: 22px; }
+    .person b { font-size: 13px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .person span { font-size: 12px; }
+    .tally { width: 100%; display: grid; gap: 6px; text-align: left; }
+    .bar { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; font-size: 13px; position: relative; padding: 6px 10px; border-radius: 10px; overflow: hidden; background: var(--screen); }
+    .bar i { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--hero) 30%, transparent); transform-origin: left; animation: grow .8s .2s both; }
+    .bar span, .bar b { position: relative; }
+
+    @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+    @keyframes pop { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: none; } }
+    @keyframes grow { from { transform: scaleX(0); } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; } }
+
+    .av { border-radius: 50%; display: grid; place-items: center; font: 800 18px var(--display); color: var(--ground); flex: none; }
+
+    .panel { background: var(--raise); border-radius: 20px; padding: 16px; display: grid; gap: 12px; border: 1px solid var(--line); }
+    .panel h2 { font-size: 16px; font-family: var(--body); font-weight: 700; }
+    .targets { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+    .target { border: 2px solid var(--line); background: var(--screen); color: var(--fg); border-radius: 16px; padding: 12px 6px;
+              display: grid; gap: 6px; justify-items: center; font: 600 13px var(--body); cursor: pointer; }
+    .target .av { width: 44px; height: 44px; }
+    .target .nm { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .target.on { border-color: var(--role); background: color-mix(in srgb, var(--role) 18%, var(--screen)); }
+    .target:focus-visible, .send:focus-visible, summary:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    .send { border: 0; border-radius: 16px; padding: 16px; font: 600 15px var(--display); background: var(--pink); color: #fff; cursor: pointer; }
+    .send:disabled { opacity: .4; }
+    .send.ghost { background: var(--screen); color: var(--fg); border: 1px solid var(--line); }
+    .err { color: var(--bad); font-size: 13px; }
+    .err:empty { display: none; }
+
+    .note { background: var(--raise); border-radius: 16px; padding: 14px 16px; line-height: 1.5; border: 1px solid var(--line); }
+    .note.me { border-color: color-mix(in srgb, var(--amber) 60%, var(--line)); }
+    .note.dead { border-color: color-mix(in srgb, var(--bad) 60%, var(--line)); }
+
+    details.role { background: var(--raise); border-radius: 20px; border: 1px solid color-mix(in srgb, var(--role) 45%, var(--line)); overflow: hidden; }
+    details.role summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
+    details.role summary::-webkit-details-marker { display: none; }
+    details.role summary .ic { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-size: 22px;
+                               background: color-mix(in srgb, var(--role) 22%, var(--ground)); border: 2px solid var(--role); }
+    details.role summary b { color: var(--role); font-family: var(--display); font-size: 15px; }
+    details.role summary small { margin-left: auto; color: var(--muted); }
+    details.role[open] summary small { visibility: hidden; }
+    details.role .body { padding: 0 16px 16px; display: grid; gap: 8px; }
     .goal { font-size: 13px; color: var(--muted); }
     .mates { font-weight: 700; color: var(--bad); }
 
-    .night { display: grid; gap: 14px; }
-    .night-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-    .timer { font-family: var(--display); font-variant-numeric: tabular-nums; color: var(--pink); }
-    .task { display: grid; gap: 10px; }
-    .task h2 { font-size: 16px; font-family: var(--body); font-weight: 700; }
-    .targets { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
-    .target { border: 2px solid var(--line); background: var(--raise); color: var(--fg); border-radius: 16px; padding: 12px 6px;
-              display: grid; gap: 6px; justify-items: center; font: 600 13px var(--body); cursor: pointer; }
-    .target .av { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font: 800 18px var(--display); color: var(--ground); }
-    .target .nm { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .target.on { border-color: var(--role); background: color-mix(in srgb, var(--role) 18%, var(--raise)); }
-    .target:focus-visible, .send:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
-    .send { border: 0; border-radius: 16px; padding: 16px; font: 600 15px var(--display); background: var(--pink); color: #fff; cursor: pointer; }
-    .send:disabled { opacity: .4; }
-
-    .note { background: var(--raise); border-radius: 16px; padding: 14px 16px; line-height: 1.5; }
     .town { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
-    .town div { display: flex; align-items: center; gap: 8px; background: var(--screen); border-radius: 12px; padding: 8px 10px; font-size: 13px; min-width: 0; }
-    .town .av { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center; font: 800 12px var(--display); color: var(--ground); }
-    .town .dead { opacity: .45; }
-    .town span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .town div { display: flex; align-items: center; gap: 8px; background: var(--screen); border-radius: 12px; padding: 8px 10px; font-size: 13px; min-width: 0; border: 1px solid transparent; }
+    .town div.self { border-color: var(--line); }
+    .town .av { width: 28px; height: 28px; font-size: 12px; }
+    .town .dead .av { opacity: .4; }
+    .town .who { min-width: 0; display: grid; }
+    .town .who b, .town .who small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .town .who b { font-weight: 600; }
+    .town .dead b { color: var(--muted); }
+    .town small { font-size: 11px; }
+    .hint { font-size: 12px; color: var(--muted); text-align: center; }
   </style>
 </head>
 <body>
@@ -79,12 +120,15 @@
     civil:   ['🙂', 'Мирный житель', '#b388ff', 'Ночью спите. Днём ищете мафию и голосуете с умом.'],
   };
   const GOALS = { mafia: 'Цель: мафии должно стать не меньше, чем остальных.', don: 'Цель: мафии должно стать не меньше, чем остальных.',
-                  maniac: 'Цель: остаться в живых последним, не считая одного мирного.',
                   bartender: 'Цель: мафии должно стать не меньше, чем остальных.',
+                  maniac: 'Цель: остаться в живых последним, не считая одного мирного.',
                   wife: 'Цель: дожить до конца вместе с мужем — тогда вы побеждаете при любом исходе.' };
   const TASKS = { kill: '🔪 Кого семья убирает?', doncheck: '🎩 Кого проверить: не комиссар ли?', heal: '💉 Кого лечите?',
                   check: '🚓 Кого проверяете?', visit: '💋 К кому заглянете?', maniac: '🪓 К кому зайти с топором?',
                   watch: '👀 За кем подглядываете?', dance: '💃 Для кого танцуете?', booze: '🍸 Кого подпаиваете?' };
+  const WIN = { town: ['🎉', 'Победили мирные', '#3ddc97'], mafia: ['🔪', 'Победила мафия', '#ff6b6b'],
+                maniac: ['🪓', 'Победил маньяк', '#ff7a45'], draw: ['🌫', 'Ничья', '#a99cc6'], stop: ['⛔', 'Партия остановлена', '#a99cc6'] };
+  const MAFIA = ['mafia', 'don', 'bartender'];
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45', '#5ed6d6', '#f06292'];
   const app = document.getElementById('app');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -101,67 +145,182 @@
   const data = decode();
   if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor && tg.setHeaderColor('#140f1f'); tg.setBackgroundColor && tg.setBackgroundColor('#140f1f'); } catch { /* старый клиент */ } }
   if (!data || !ROLES[data.r]) {
-    app.innerHTML = '<h2>Мафия 18+</h2><p class="muted">Откройте эту страницу кнопкой «🎭 Моя роль» в личке бота во время партии.</p>';
+    app.innerHTML = '<h2>Мафия 18+</h2><p class="muted">Откройте эту страницу кнопкой «🎭 Игра» в личке бота во время партии.</p>';
     return;
   }
 
+  const P = data.p || {};
+  const ids = Object.keys(P);
+  const me = data.me;
+  const st = data.st || (data.t ? 'night' : data.v ? 'vote' : 'day');
+  const meAlive = me && P[me] ? !!P[me][1] : true;
   const [icon, roleName, color, about] = ROLES[data.r];
   document.documentElement.style.setProperty('--role', color);
-  const ids = Object.keys(data.p || {});
-  const colorOf = uid => COLORS[ids.indexOf(uid) % COLORS.length];
-  const nameOf = uid => (data.p[uid] || ['?'])[0];
+  const colorOf = uid => COLORS[Math.max(0, ids.indexOf(uid)) % COLORS.length];
+  const nameOf = uid => (P[uid] || ['?'])[0];
+  const roleOf = uid => (P[uid] || [])[2];
   const initial = uid => esc((nameOf(uid).match(/[\p{L}\p{N}]/u) || ['?'])[0].toUpperCase());
+  const av = (uid, extra = '') => `<span class="av" style="background:${colorOf(uid)}${extra}">${initial(uid)}</span>`;
   const tasks = data.t || {};
   const chosen = {};
-  const nightOpen = () => data.dl && Date.now() / 1000 < data.dl && Object.keys(tasks).length > 0;
-  const voteOpen = () => data.v && data.dl && Date.now() / 1000 < data.dl;
   let vote = null;
-  const avatarBtn = (attr, uid, on) => `
-    <button class="target ${on ? 'on' : ''}" ${attr}>
-      <span class="av" style="background:${uid === 'skip' ? '#3a2d5c' : colorOf(uid)}">${uid === 'skip' ? '🤷' : initial(uid)}</span>
-      <span class="nm">${uid === 'skip' ? 'Пропустить' : esc(nameOf(uid))}</span></button>`;
+  const events = data.ev || [];
+  const lastOf = k => [...events].reverse().find(e => e.k === k);
+  const secLeft = () => data.dl ? Math.max(0, Math.round(data.dl - Date.now() / 1000)) : 0;
+  const mmss = s => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  const haptic = kind => { try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch { /* */ } };
 
-  function render() {
-    const open = nightOpen();
-    const left = data.dl ? Math.max(0, Math.round(data.dl - Date.now() / 1000)) : 0;
-    const mmss = s => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  // ---------- карточки событий ----------
+  function morningCard(e) {
+    const dead = e.dead || [];
+    document.documentElement.style.setProperty('--hero', dead.length ? '#ff6b6b' : '#ffb547');
+    return `<section class="hero">
+      <div class="big" aria-hidden="true">${dead.length ? '🌅' : '☀️'}</div>
+      <h2>Утро ${e.n}</h2>
+      ${dead.length ? `<p>${dead.length > 1 ? 'Этой ночью погибли' : 'Этой ночью погиб(ла)'}:</p>
+        <div class="people">${dead.map((u, i) => `<div class="person" style="animation-delay:${.2 + i * .15}s">${av(u)}
+          <b>${esc(nameOf(u))}</b><span style="color:${(ROLES[roleOf(u)] || [])[2] || 'inherit'}">${(ROLES[roleOf(u)] || ['', '?'])[1]}${u === e.jl ? ' · 💍 ревность' : ''}</span></div>`).join('')}</div>`
+        : `<p>${e.sv ? '💉 Доктор успел — все живы!' : 'Ночь прошла спокойно — все живы.'}</p>`}
+      ${e.sl ? `<p class="small muted">💃 ${esc(nameOf(e.sl))} сегодня не голосует — после танца Стриптизёрши.</p>` : ''}
+    </section>`;
+  }
+
+  function verdictCard(e) {
+    const total = (e.ty || []).reduce((a, [, c]) => a + c, 0) || 1;
+    document.documentElement.style.setProperty('--hero', e.x ? '#ff6b6b' : '#2aabee');
+    return `<section class="hero">
+      <div class="big" aria-hidden="true">${e.x ? '⚖️' : '🤷'}</div>
+      <h2>Приговор, день ${e.d}</h2>
+      ${e.x ? `<div class="people"><div class="person">${av(e.x)}<b>${esc(nameOf(e.x))}</b>
+          <span style="color:${(ROLES[roleOf(e.x)] || [])[2] || 'inherit'}">${(ROLES[roleOf(e.x)] || ['', '?'])[1]}</span></div></div>
+          <p>Город отправил на виселицу: <b>${esc(nameOf(e.x))}</b>.</p>`
+        : '<p>Город не договорился — никого не казнили.</p>'}
+      ${(e.ty || []).length ? `<div class="tally">${e.ty.map(([t, c]) => `<div class="bar"><i style="width:${Math.round(c / total * 100)}%"></i>
+          <span>${t === 'skip' ? '🤷 Пропустить' : esc(nameOf(t))}</span><b>${c}</b></div>`).join('')}</div>` : ''}
+    </section>`;
+  }
+
+  function finalCard() {
+    const [ic, title, c] = WIN[data.w] || WIN.stop;
+    document.documentElement.style.setProperty('--hero', c);
+    const mine = data.w === 'town' ? !MAFIA.includes(data.r) && !['maniac', 'wife'].includes(data.r)
+      : data.w === 'mafia' ? MAFIA.includes(data.r) : data.w === 'maniac' ? data.r === 'maniac' : false;
+    const wife = data.ww && data.r === 'wife';
+    return `<section class="hero">
+      <div class="big" aria-hidden="true">${ic}</div>
+      <h2>${title}</h2>
+      ${data.w !== 'stop' && data.w !== 'draw' ? `<p><b>${mine || wife ? '🏆 Вы в команде победителей!' : 'В этот раз не ваша победа.'}</b></p>` : ''}
+      ${data.ww ? '<p class="small">💍 Ревнивая жена дожила до конца вместе с мужем — она тоже победила.</p>' : ''}
+      <p class="small muted">Все роли раскрыты — смотрите табло ниже. Ещё партию? /mafia в группе.</p>
+    </section>`;
+  }
+
+  // ---------- действия ----------
+  function nightPanel() {
+    const open = secLeft() > 0 && Object.keys(tasks).length > 0;
+    if (!open) return `<p class="note">${Object.keys(tasks).length ? '⏰ Время на ход вышло. Утром бот пришлёт новости — откройте «🎭 Игра» снова.'
+                                                                      : '😴 Вы спите. Утром бот пришлёт новости — откройте «🎭 Игра» снова.'}</p>`;
     const ready = Object.keys(tasks).every(k => chosen[k]);
-    app.innerHTML = `
-      <div class="eyebrow">Мафия 18+ · ${esc(data.g || '')}</div>
-      <section class="card">
-        <div class="icon" aria-hidden="true">${icon}</div>
-        <h1>${roleName}</h1>
+    return `<section class="panel">
+      ${Object.entries(tasks).map(([k, targets]) => `<h2>${TASKS[k] || k}</h2>
+        <div class="targets">${targets.map(uid => `<button class="target ${chosen[k] === uid ? 'on' : ''}" data-k="${k}" data-t="${esc(uid)}">
+          ${av(uid)}<span class="nm">${esc(nameOf(uid))}</span></button>`).join('')}</div>`).join('')}
+      <button class="send" id="send" ${ready ? '' : 'disabled'}>${ready ? 'Отправить ход' : 'Выберите цель'}</button>
+      <p class="err" id="err"></p>
+    </section>`;
+  }
+
+  function votePanel() {
+    if (!data.v) return `<p class="note">${meAlive ? '💃 Сегодня вы не голосуете — после танца Стриптизёрши.' : '👻 Голосуют живые. Приговор пришлёт бот.'}</p>`;
+    if (!secLeft()) return '<p class="note">⏰ Голосование закончилось. Приговор пришлёт бот — откройте «🎭 Игра» снова.</p>';
+    return `<section class="panel">
+      <h2>🗳 Кого казним? Голос тайный</h2>
+      <p class="small muted">В группе видно только, сколько человек проголосовало.</p>
+      <div class="targets">${data.v.concat('skip').map(uid => `<button class="target ${vote === uid ? 'on' : ''}" data-vote="${esc(uid)}">
+        ${uid === 'skip' ? '<span class="av" style="background:#3a2d5c">🤷</span>' : av(uid)}
+        <span class="nm">${uid === 'skip' ? 'Пропустить' : esc(nameOf(uid))}</span></button>`).join('')}</div>
+      <button class="send" id="sendVote" ${vote ? '' : 'disabled'}>${vote ? 'Проголосовать' : 'Выберите, за кого'}</button>
+      <p class="err" id="err"></p>
+    </section>`;
+  }
+
+  // ---------- экран ----------
+  function phaseTitle() {
+    if (st === 'end') return 'Игра окончена';
+    if (st === 'lobby') return 'Партия начинается';
+    if (st === 'night') return `Ночь ${data.n}`;
+    if (st === 'vote') return `День ${data.d} · голосование`;
+    return `День ${data.d}`;
+  }
+
+  function main() {
+    const out = [];
+    if (st === 'end') {
+      out.push(finalCard());
+    } else if (st === 'lobby') {
+      out.push('<p class="note">🌙 Роли розданы. Первая ночь вот-вот наступит — бот пришлёт сообщение, откройте «🎭 Игра» снова.</p>');
+    } else if (st === 'night') {
+      const v = lastOf('v');
+      if (v && v.d === data.d && data.n > 1) out.push(verdictCard(v));
+      if (meAlive) out.push(nightPanel());
+    } else if (st === 'day') {
+      const n = lastOf('n');
+      if (n && n.n === data.n) out.push(morningCard(n));
+      if (meAlive) out.push('<p class="note">💬 Обсуждаем в группе, кто тут мафия. Голосование начнётся по таймеру или раньше — по кнопке «К голосованию» в группе. Бот пришлёт сообщение — откройте «🎭 Игра».</p>');
+    } else if (st === 'vote') {
+      out.push(votePanel());
+      const n = lastOf('n');
+      if (n && n.n === data.n) out.push(morningCard(n));
+    }
+    if (!meAlive && st !== 'end') out.unshift('<p class="note dead">💀 Вы выбыли из игры и теперь зритель: видите новости и табло, но не ходите и не голосуете.</p>');
+    if (data.nt && data.nt.length && st !== 'night') out.push(`<p class="note me">${data.nt.map(esc).join('<br>')}</p>`);
+    return out.join('');
+  }
+
+  function roleBlock() {
+    const open = st === 'night' && data.n <= 1 && !Object.keys(chosen).length;
+    return `<details class="role" ${open ? 'open' : ''}>
+      <summary><span class="ic" aria-hidden="true">${icon}</span><span><span class="eyebrow">Ваша роль</span><br><b>${roleName}</b></span><small>подробнее</small></summary>
+      <div class="body">
         <p>${about}</p>
         <p class="goal">${GOALS[data.r] || 'Цель: вычислить и казнить всю мафию и маньяка.'}</p>
         ${data.m && data.m.length ? `<p class="mates">Ваша семья: ${data.m.map(esc).join(', ')}</p>` : ''}
         ${data.hb ? `<p class="mates">💍 Ваш муж: ${esc(data.hb)}</p>` : ''}
-      </section>
-      ${open ? `
-      <section class="night">
-        <div class="night-head"><h2>Ночь ${data.n}</h2><span class="timer" id="left">${mmss(left)}</span></div>
-        ${Object.entries(tasks).map(([k, targets]) => `
-          <div class="task"><h2>${TASKS[k] || k}</h2>
-            <div class="targets">${targets.map(uid => `
-              <button class="target ${chosen[k] === uid ? 'on' : ''}" data-k="${k}" data-t="${esc(uid)}">
-                <span class="av" style="background:${colorOf(uid)}">${initial(uid)}</span>
-                <span class="nm">${esc(nameOf(uid))}</span></button>`).join('')}</div></div>`).join('')}
-        <button class="send" id="send" ${ready ? '' : 'disabled'}>${ready ? 'Отправить ход' : 'Выберите цель'}</button>
-        <p class="muted small" id="err"></p>
-      </section>` : voteOpen() ? `
-      <section class="night">
-        <div class="night-head"><h2>Тайное голосование</h2><span class="timer" id="left">${mmss(left)}</span></div>
-        <p class="muted small">Кого казним? Ваш выбор не увидит никто — в группе только счётчик.</p>
-        <div class="targets">${data.v.concat('skip').map(uid => avatarBtn(`data-vote="${esc(uid)}"`, uid, vote === uid)).join('')}</div>
-        <button class="send" id="sendVote" ${vote ? '' : 'disabled'}>${vote ? 'Проголосовать' : 'Выберите, за кого'}</button>
-        <p class="muted small" id="err"></p>
-      </section>` : `
-      <p class="note">${data.dl && Object.keys(tasks).length ? '⏰ Эта ночь уже закончилась — смотрите, что случилось, в группе.'
-          : data.n ? '😴 Сейчас ваш ход не нужен. Днём обсуждаем и голосуем в группе.' : 'Партия начинается — первая ночь вот-вот наступит.'}</p>`}
-      <section class="stack">
-        <div class="eyebrow" style="margin-bottom:8px">Город</div>
-        <div class="town">${ids.map(uid => `<div class="${data.p[uid][1] ? '' : 'dead'}">
-          <span class="av" style="background:${colorOf(uid)}">${initial(uid)}</span><span>${data.p[uid][1] ? '' : '💀 '}${esc(nameOf(uid))}</span></div>`).join('')}</div>
-      </section>`;
+      </div>
+    </details>`;
+  }
+
+  function townBlock() {
+    const alive = ids.filter(u => P[u][1]).length;
+    return `<section>
+      <div class="eyebrow" style="margin-bottom:8px">Город · живых ${alive} из ${ids.length}</div>
+      <div class="town">${ids.map(uid => {
+        const r = roleOf(uid), dead = !P[uid][1];
+        const label = r ? `<small style="color:${ROLES[r][2]}">${ROLES[r][0]} ${ROLES[r][1]}</small>` : `<small class="muted">${dead ? '' : 'в игре'}</small>`;
+        return `<div class="${dead ? 'dead' : ''} ${uid === me ? 'self' : ''}">${av(uid)}
+          <span class="who"><b>${dead ? '💀 ' : ''}${esc(nameOf(uid))}${uid === me ? ' (вы)' : ''}</b>${label}</span></div>`;
+      }).join('')}</div>
+    </section>`;
+  }
+
+  function render() {
+    const left = secLeft();
+    app.innerHTML = `
+      <div class="eyebrow">Мафия 18+ · ${esc(data.g || '')}</div>
+      <div class="top"><h1>${phaseTitle()}</h1>${data.dl && st !== 'end' ? `<span class="timer ${left ? '' : 'over'}" id="left">${left ? mmss(left) : 'время вышло'}</span>` : ''}</div>
+      ${main()}
+      ${roleBlock()}
+      ${townBlock()}
+      ${st === 'end' ? '' : '<p class="hint">Новая фаза — бот пришлёт сообщение. Нажмите «🎭 Игра» внизу чата, чтобы увидеть, что случилось.</p>'}`;
+  }
+
+  function send(payload, fallback) {
+    try {
+      if (!tg || typeof tg.sendData !== 'function' || tg.platform === 'unknown') throw new Error('не в Telegram');
+      tg.sendData(JSON.stringify(payload));  // Telegram передаст ход боту и закроет окно
+    } catch {
+      document.getElementById('err').textContent = fallback;
+    }
   }
 
   app.addEventListener('click', e => {
@@ -171,40 +330,25 @@
       try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch { /* */ }
       return render();
     }
-    if (e.target.id === 'sendVote') {
-      try {
-        if (!tg || !tg.initData) throw new Error('не в Telegram');
-        tg.sendData(JSON.stringify({ a: 'v', c: data.c, d: data.d, t: vote }));
-      } catch {
-        document.getElementById('err').textContent = 'Не удалось отправить отсюда. Проголосуйте кнопками в группе.';
-      }
-      return;
-    }
+    if (e.target.id === 'sendVote') return send({ a: 'v', c: data.c, d: data.d, t: vote }, 'Не удалось отправить отсюда. Проголосуйте кнопками в группе.');
     const t = e.target.closest('.target');
     if (t) {
       chosen[t.dataset.k] = t.dataset.t;
       try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch { /* */ }
       return render();
     }
-    if (e.target.id === 'send') {
-      const payload = JSON.stringify({ a: 'n', c: data.c, n: data.n, acts: chosen });
-      try {
-        if (!tg || !tg.initData) throw new Error('не в Telegram');
-        tg.sendData(payload);  // Telegram передаст ход боту и закроет окно
-      } catch {
-        document.getElementById('err').textContent = 'Не удалось отправить отсюда. Выберите кнопками в чате с ботом.';
-      }
-    }
+    if (e.target.id === 'send') send({ a: 'n', c: data.c, n: data.n, acts: chosen }, 'Не удалось отправить отсюда. Выберите кнопками в чате с ботом.');
   });
 
   render();
+  if (st === 'end') haptic(['town', 'mafia', 'maniac'].includes(data.w) ? 'success' : 'warning');
+  else if (st === 'day' && (lastOf('n') || {}).dead && lastOf('n').dead.length) haptic('warning');
   setInterval(() => {
     const el = document.getElementById('left');
-    if (el) {
-      const left = Math.max(0, Math.round(data.dl - Date.now() / 1000));
-      el.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
-      if (!left) render();
-    }
+    if (!el) return;
+    const left = secLeft();
+    if (left) el.textContent = mmss(left);
+    else if (!el.classList.contains('over')) render();
   }, 1000);
 })();
 </script>
