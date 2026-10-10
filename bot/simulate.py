@@ -116,6 +116,7 @@ class Sim:
         B.db_init(B.DATA / "sim.db")
         B.GAMES.clear()
         B.BOT = "krokodil_party_18_bot"
+        B.APP_ONLY = False  # симуляция показывает ленту группы — старый режим
         B.api = B.api_upload = Recorder(self)
         clock = [1_800_000_000.0]
         B.now = lambda: clock[0]

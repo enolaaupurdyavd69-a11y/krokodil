@@ -244,7 +244,9 @@ class BotFlow(unittest.TestCase):
         B.LOG_PATH = B.DATA / "bot.log"
         B.db_init(B.DATA / "test.db")
         B.GAMES.clear()
+        B.FINALS.clear(), B.TOASTS.clear(), B.FORCE.clear(), B.DIRTY.clear()
         B.BOT = "krokodil_party_18_bot"
+        B.APP_ONLY = False  # старый режим (группа + лички); режим «только приложение» — класс AppOnly
         self.tg = FakeTelegram()
         B.api = B.api_upload = self.tg
         self.clock = [1_000_000.0]
@@ -383,6 +385,7 @@ class BotFlow(unittest.TestCase):
         # «перезагрузка ПК»: память процесса пропала, база осталась, прошло 10 минут
         B.kv_set("heartbeat", self.clock[0])
         B.GAMES.clear()
+        B.FINALS.clear(), B.TOASTS.clear(), B.FORCE.clear(), B.DIRTY.clear()
         self.clock[0] += 600
         B.GAMES.update(B.load_games())
         B.resume_after_downtime()
@@ -626,3 +629,90 @@ class BotFlow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppOnly(unittest.TestCase):
+    """Режим «только приложение»: группа — только меню, в личке одно сообщение-экран, всё — из «🎭 Игра»."""
+    msg, press, answers, keyboard_data = BotFlow.msg, BotFlow.press, BotFlow.answers, BotFlow.keyboard_data
+
+    def setUp(self):
+        BotFlow.setUp(self)
+        B.APP_ONLY = True
+
+    def tearDown(self):
+        B.APP_ONLY = False
+        BotFlow.tearDown(self)
+
+    def app(self, uid, **payload):
+        B.handle({"message": {"message_id": 7, "chat": {"id": int(uid), "type": "private"},
+                              "from": {"id": int(uid), "first_name": f"Игрок{uid}"},
+                              "web_app_data": {"data": json.dumps({"c": GROUP, **payload})}}})
+
+    def live_messages(self, uid):
+        sent = [p for m, p in self.tg.sent if m == "sendMessage" and str(p["chat_id"]) == str(uid)]
+        ids = list(range(len(sent)))
+        deleted = sum(1 for m, p in self.tg.sent if m == "deleteMessage" and str(p["chat_id"]) == str(uid)
+                      and p.get("message_id") != 7)
+        return len(ids) - deleted
+
+    def test_whole_game_through_app(self):
+        self.msg(GROUP, "supergroup", 1, "/games", "Пятница")
+        menu = self.tg.to(GROUP)[-1]
+        self.assertIn(f"start=m{GROUP}", json.dumps(menu["reply_markup"]), "«Мафия» в меню ведёт в приложение")
+        for u in (1, 2):
+            self.msg(u, "private", u, f"/start m{GROUP}")
+        url, data = self.keyboard_data(1)
+        self.assertEqual((data["st"], data["g"]), ("menu", "Пятница"))
+        self.app(1, a="open")
+        self.app(2, a="join")
+        url, data = self.keyboard_data(2)
+        self.assertEqual((data["st"], data["in"], len(data["j"])), ("lobby", 1, 2))
+        self.app(2, a="addbot")
+        self.app(1, a="begin")
+        g = B.GAMES[GROUP]
+        self.assertEqual(g["status"], "night")
+        self.assertEqual(len(g["players"]), 5, "недостающих добрали ботами")
+        for _ in range(80):
+            g = B.GAMES.get(GROUP)
+            if not g:
+                break
+            for u in ("1", "2"):
+                if g["status"] == "night" and g["players"][u]["alive"]:
+                    acts = {k: ts[0] for v, k, ts in E.night_tasks(g) if v == u}
+                    if acts:
+                        self.app(u, a="n", n=g["night_no"], acts=acts)
+                elif g["status"] == "day" and u in E.voters(g):
+                    self.app(u, a="tv")
+                elif g["status"] == "vote" and u in E.voters(g) and u not in g["votes"]:
+                    self.app(u, a="v", d=g["day_no"], t=E.SKIP)
+                if GROUP not in B.GAMES:
+                    break
+            if GROUP in B.GAMES:
+                self.clock[0] += 5
+                B.tick()
+        self.assertNotIn(GROUP, B.GAMES, "партия доходит до конца")
+        for u in (1, 2):
+            url, data = self.keyboard_data(u)
+            self.assertEqual(data["st"], "end", "финал — в приложении")
+            self.assertLessEqual(self.live_messages(u), 1, "в личке остаётся одно сообщение-экран")
+        group = [p.get("text", "") for p in self.tg.to(GROUP)]
+        self.assertEqual(len(group), 1, f"в группе от Мафии ничего, кроме меню: {group[1:]}")
+        self.assertTrue(any(f.get("disable_notification") for m, f in self.tg.sent if m == "sendMessage"),
+                        "без смены фазы — без звука")
+
+    def test_lobby_cancel_and_quit(self):
+        self.msg(1, "private", 1, f"/start m{GROUP}")
+        self.app(1, a="open")
+        self.app(1, a="cancel")
+        self.assertNotIn(GROUP, B.GAMES)
+        url, data = self.keyboard_data(1)
+        self.assertEqual(data["st"], "menu")
+        self.assertIn("Набор отменён", self.tg.to(1)[-1]["text"])
+        self.app(1, a="open")
+        self.app(1, a="begin")
+        g = B.GAMES[GROUP]
+        self.app(1, a="q")
+        self.assertNotIn(GROUP, B.GAMES, "единственный человек ушёл — игра кончилась (остались боты)") \
+            if GROUP not in B.GAMES else self.assertFalse(g["players"]["1"]["alive"])
+        url, data = self.keyboard_data(1)
+        self.assertIn(data["st"], ("end", "night", "day"))

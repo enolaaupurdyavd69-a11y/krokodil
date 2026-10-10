@@ -103,6 +103,17 @@
             font: 600 13px var(--body); cursor: pointer; text-align: center; }
     .chip.quit { color: var(--bad); }
     .chip:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    .actions { display: grid; gap: 10px; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .list { display: grid; gap: 8px; }
+    .list div { display: flex; align-items: center; gap: 10px; background: var(--screen); border-radius: 12px; padding: 8px 10px; font-size: 14px; }
+    .list .av { width: 32px; height: 32px; font-size: 14px; }
+    .feed { display: grid; gap: 8px; }
+    .feed div { background: var(--screen); border-radius: 12px; padding: 8px 12px; font-size: 13px; line-height: 1.45; }
+    .feed b { color: var(--amber); }
+    .ok { color: var(--ok); font-weight: 700; }
+    .lead { font-size: 15px; line-height: 1.55; }
+    .steps { margin: 0; padding-left: 20px; line-height: 1.6; color: var(--muted); font-size: 14px; }
   </style>
 </head>
 <body>
@@ -149,8 +160,67 @@
 
   const data = decode();
   if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor && tg.setHeaderColor('#140f1f'); tg.setBackgroundColor && tg.setBackgroundColor('#140f1f'); } catch { /* старый клиент */ } }
-  if (!data || !ROLES[data.r]) {
-    app.innerHTML = '<h2>Мафия 18+</h2><p class="muted">Откройте эту страницу кнопкой «🎭 Игра» в личке бота во время партии.</p>';
+  if (!data || !(ROLES[data.r] || ['menu', 'lobby', 'busy'].includes(data.st))) {
+    app.innerHTML = '<h2>Мафия 18+</h2><p class="muted">Нажмите «🎭 Мафия» в меню группы — откроется личка бота с кнопкой «🎭 Игра».</p>';
+    return;
+  }
+
+  // ---------- действия: Telegram передаёт их боту и закрывает окно; бот пришлёт новый экран ----------
+  const CLOSE_NOTE = 'После нажатия окно закроется — бот за пару секунд обновит экран. Нажмите «🎭 Игра» снова.';
+  function act(payload, errId = 'err2') {
+    try {
+      if (!tg || typeof tg.sendData !== 'function' || tg.platform === 'unknown') throw new Error('не в Telegram');
+      tg.sendData(JSON.stringify({ c: data.c, ...payload }));
+    } catch {
+      const el = document.getElementById(errId);
+      if (el) el.textContent = 'Не получилось отправить: откройте эту страницу кнопкой «🎭 Игра» в личке бота.';
+    }
+  }
+  const COLORS0 = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45', '#5ed6d6', '#f06292'];
+  const avatar0 = (name, i) => `<span class="av" style="background:${COLORS0[i % COLORS0.length]}">${esc(((name || '?').match(/[\p{L}\p{N}]/u) || ['?'])[0].toUpperCase())}</span>`;
+  const head0 = title => `<div class="eyebrow">Мафия 18+ · ${esc(data.g || '')}</div><div class="top"><h1>${title}</h1></div>`;
+  const RULES0 = `<details class="role"><summary><span class="ic">📜</span><span><b>Как играть</b></span><small>открыть</small></summary>
+    <div class="body"><ol class="steps"><li>Каждому достаётся тайная роль: мафия, мирный, доктор, комиссар и пикантные роли 18+.</li>
+    <li>Ночью роли делают ход в этом приложении.</li><li>Утром — новости: кто погиб. Днём обсуждаете и тайно голосуете здесь.</li>
+    <li>Мирные побеждают, казнив всю мафию; мафия — когда её не меньше, чем остальных.</li></ol></div></details>`;
+
+  if (data.st === 'menu' || data.st === 'lobby' || data.st === 'busy') {
+    const page = [];
+    if (data.st === 'menu') {
+      page.push(head0('Мафия 18+'));
+      page.push('<p class="lead">Игра для компании от 5 человек — у каждого свой телефон. Не хватает людей — добавим ботов.</p>');
+      page.push(data.busy ? '<p class="note">В группе сейчас идёт другая игра. Дождитесь её конца.</p>'
+        : '<div class="actions"><button class="send" data-act="open">▶️ Новая игра</button></div>'
+          + '<p class="hint">Вы откроете набор, остальные присоединятся кнопкой «🎭 Мафия» в меню группы.</p>');
+      page.push(RULES0);
+    } else if (data.st === 'busy') {
+      page.push(head0('Идёт партия'));
+      page.push(`<p class="note">В группе уже играют (${data.np} игроков), вас в этой партии нет. Дождитесь конца — и начните новую.</p>`);
+      page.push('<div class="actions"><button class="send ghost" data-act="refresh">🔄 Обновить</button></div>');
+    } else {
+      const j = data.j || [], lack = Math.max(0, data.min - j.length);
+      page.push(head0('Набор игроков'));
+      page.push(`<section class="panel"><h2>Игроки: ${j.length}</h2><div class="list">${j.map(([u, n, b], i) =>
+        `<div>${avatar0(n, i)}<span>${b ? '🤖 ' : ''}${esc(n)}${u === data.me ? ' <span class="muted">(вы)</span>' : ''}</span></div>`).join('')}</div>
+        <p class="small ${lack ? 'muted' : 'ok'}">${lack ? `Не хватает ${lack} — при старте добавим ботов 🤖` : 'Можно начинать ✅'}</p></section>`);
+      if (!data.in) {
+        page.push('<div class="actions"><button class="send" data-act="join">🙋 Я играю</button></div>');
+      } else {
+        page.push(`<div class="actions">
+          <button class="send" data-act="begin">${lack ? `▶️ Начать (+${lack} 🤖)` : '▶️ Начать игру'}</button>
+          <div class="row2"><button class="chip" data-act="addbot">🤖 + бот</button><button class="chip" data-act="delbot">🤖 − бот</button></div>
+          <div class="row2"><button class="chip" data-act="refresh">🔄 Обновить</button><button class="chip quit" data-act="leave">🚪 Не играю</button></div>
+          ${data.own ? '<button class="chip quit" data-act="cancel">✖️ Отменить набор</button>' : ''}</div>`);
+      }
+      page.push('<p class="hint">Друзья присоединяются кнопкой «🎭 Мафия» в меню группы.</p>');
+      page.push(RULES0);
+    }
+    page.push(`<p class="hint">${CLOSE_NOTE}</p><p class="err" id="err2"></p>`);
+    app.innerHTML = page.join('');
+    app.addEventListener('click', e => {
+      const b = e.target.closest('[data-act]');
+      if (b) act({ a: b.dataset.act });
+    });
     return;
   }
 
@@ -216,12 +286,15 @@
       <h2>${title}</h2>
       ${data.w !== 'stop' && data.w !== 'draw' ? `<p><b>${mine || wife ? '🏆 Вы в команде победителей!' : 'В этот раз не ваша победа.'}</b></p>` : ''}
       ${data.ww ? '<p class="small">💍 Ревнивая жена дожила до конца вместе с мужем — она тоже победила.</p>' : ''}
-      <p class="small muted">Все роли раскрыты — смотрите табло ниже. Ещё партию? /mafia в группе.</p>
+      <p class="small muted">Все роли раскрыты — смотрите табло ниже.</p>
+      <button class="send" data-act="open">▶️ Новая игра</button>
     </section>`;
   }
 
   // ---------- действия ----------
   function nightPanel() {
+    const todo = Object.keys(tasks).filter(k => !(data.done || []).includes(k));
+    if (Object.keys(tasks).length && !todo.length) return '<p class="note"><span class="ok">✅ Ход принят.</span> Ждём остальных — утром новости здесь.</p>';
     const open = secLeft() > 0 && Object.keys(tasks).length > 0;
     if (!open) return `<p class="note">${Object.keys(tasks).length ? '⏰ Время на ход вышло. Утром бот пришлёт новости — откройте «🎭 Игра» снова.'
                                                                       : '😴 Вы спите. Утром бот пришлёт новости — откройте «🎭 Игра» снова.'}</p>`;
@@ -237,6 +310,7 @@
 
   function votePanel() {
     if (!data.v) return `<p class="note">${meAlive ? '💃 Сегодня вы не голосуете — после танца Стриптизёрши.' : '👻 Голосуют живые. Приговор пришлёт бот.'}</p>`;
+    if (data.my) return `<p class="note"><span class="ok">✅ Ваш голос: ${data.my === 'skip' ? 'пропустить' : esc(nameOf(data.my))}.</span> Проголосовали ${(data.vc || [])[0]} из ${(data.vc || [])[1]}.</p>`;
     if (!secLeft()) return '<p class="note">⏰ Голосование закончилось. Приговор пришлёт бот — откройте «🎭 Игра» снова.</p>';
     return `<section class="panel">
       <h2>🗳 Кого казним? Голос тайный</h2>
@@ -271,7 +345,13 @@
     } else if (st === 'day') {
       const n = lastOf('n');
       if (n && n.n === data.n) out.push(morningCard(n));
-      if (meAlive) out.push('<p class="note">💬 Обсуждаем в группе, кто тут мафия. Голосование начнётся по таймеру или раньше — по кнопке «К голосованию» в группе. Бот пришлёт сообщение — откройте «🎭 Игра».</p>');
+      if (meAlive && data.tv) {
+        const [have, need, mine] = data.tv;
+        out.push(`<section class="panel"><h2>💬 Обсуждаем, кто тут мафия</h2>
+          <p class="small muted">Голосование начнётся по таймеру или раньше, если половина нажмёт кнопку.</p>
+          ${mine ? `<p class="ok">✅ Вы за голосование (${have} из ${need})</p>`
+                 : `<button class="send" data-act="tv">🗳 К голосованию (${have} из ${need})</button>`}</section>`);
+      }
     } else if (st === 'vote') {
       out.push(votePanel());
       const n = lastOf('n');
@@ -279,6 +359,10 @@
     }
     if (!meAlive && st !== 'end') out.unshift('<p class="note dead">💀 Вы выбыли из игры и теперь зритель: видите новости и табло, но не ходите и не голосуете.</p>');
     if (data.nt && data.nt.length && st !== 'night') out.push(`<p class="note me">${data.nt.map(esc).join('<br>')}</p>`);
+    if ((st === 'day' || st === 'vote') && data.fd && data.fd.length) {
+      out.push(`<section><div class="eyebrow" style="margin-bottom:8px">Что говорят в городе</div><div class="feed">${data.fd.map(([w, t]) =>
+        `<div><b>${String(w || '').startsWith('b') ? '🤖 ' : ''}${esc(nameOf(w))}:</b> ${esc(t)}</div>`).join('')}</div></section>`);
+    }
     return out.join('');
   }
 
@@ -317,9 +401,11 @@
       ${roleBlock()}
       ${townBlock()}
       ${st === 'end' ? '' : '<p class="hint">Новая фаза — бот пришлёт сообщение. Нажмите «🎭 Игра» внизу чата, чтобы увидеть, что случилось.</p>'}
-      <div class="bar-top">
-        ${data.gl ? '<button class="chip" id="toGroup">↩️ В группу</button>' : ''}
+      <div class="actions">
+        <div class="row2"><button class="chip" data-act="refresh">🔄 Обновить</button>
+          ${data.gl ? '<button class="chip" id="toGroup">↩️ В группу</button>' : '<span></span>'}</div>
         ${meAlive && st !== 'end' && st !== 'lobby' ? '<button class="chip quit" id="quit">🚪 Выйти из игры</button>' : ''}
+        ${data.own && st !== 'end' ? '<button class="chip quit" data-act="stop">⛔ Остановить игру для всех</button>' : ''}
       </div>
       <p class="err" id="err2"></p>`;
   }
@@ -349,6 +435,15 @@
   }
 
   app.addEventListener('click', e => {
+    const ab = e.target.closest('[data-act]');
+    if (ab) {
+      if (ab.dataset.act === 'stop') {
+        const go = ok => ok && act({ a: 'stop' });
+        try { if (tg && tg.showConfirm && tg.platform !== 'unknown') return tg.showConfirm('Остановить игру для всех?', go); } catch { /* */ }
+        return go(window.confirm('Остановить игру для всех?'));
+      }
+      return act({ a: ab.dataset.act });
+    }
     if (e.target.id === 'toGroup') return toGroup();
     if (e.target.id === 'quit') return quit();
     const vb = e.target.closest('[data-vote]');

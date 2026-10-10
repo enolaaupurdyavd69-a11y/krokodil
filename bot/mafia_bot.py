@@ -32,7 +32,7 @@ except ImportError:
 
 APP_URL = "https://enolaaupurdyavd69-a11y.github.io/krokodil/"
 MAFIA_URL = APP_URL + "mafia.html"
-APP_VER = "5"  # меняется вместе с mafia.html — сбрасывает кеш Telegram
+APP_VER = "6"  # меняется вместе с mafia.html — сбрасывает кеш Telegram
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -47,6 +47,7 @@ LOBBY_SEC = 30 * 60
 RESUME_GRACE = 30  # после простоя бота даём столько секунд на текущую фазу
 PARTY_TURN_SEC = 120  # Крокодил/Табу в группе: время на одно слово
 PARTY_IDLE_SEC = 2 * 3600  # без ведущего столько — игра закрывается
+APP_ONLY = True  # Мафия только в приложении: в группе ничего, в личке — одно сообщение-экран с кнопкой «🎭 Игра»
 
 API = ""
 BOT = ""
@@ -148,10 +149,22 @@ def is_bot(uid):
     return str(uid).startswith("b")
 
 
-def send(chat, text, rows=None, markup=None):
-    if is_bot(chat):
+def quiet(chat):
+    """В режиме «только приложение» Мафия не пишет ни в группу, ни в лички (кроме экрана — force=True)."""
+    if not APP_ONLY:
+        return False
+    g = GAMES.get(str(chat))
+    if g:
+        return not is_party(g)
+    return not str(chat).startswith("-") and game_of_user(str(chat)) is not None
+
+
+def send(chat, text, rows=None, markup=None, force=False, silent=False):
+    if is_bot(chat) or (not force and quiet(chat)):
         return {"message_id": 0}
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if silent:
+        p["disable_notification"] = True
     if rows or markup:
         p["reply_markup"] = markup or kb(rows)
     return safe("sendMessage", **p)
@@ -159,7 +172,7 @@ def send(chat, text, rows=None, markup=None):
 
 def send_photo(chat, make, caption, rows=None, markup=None):
     """Картинка с подписью. make() рисует PNG; не вышло — отправляем ту же подпись текстом."""
-    if is_bot(chat):
+    if is_bot(chat) or quiet(chat):
         return {"message_id": 0}
     data = None
     if C:
@@ -189,6 +202,10 @@ def edit(chat, msg_id, text, rows=None):
 
 
 def answer(cq, text="", alert=False, url=None):
+    if cq.get("id") is None:  # действие пришло из приложения — ответ покажем на экране игрока
+        if text:
+            TOASTS[str(cq["from"]["id"])] = text
+        return
     p = {"callback_query_id": cq["id"], "text": text, "show_alert": alert}
     if url:
         p["url"] = url  # t.me/бот?start=… — Telegram сам откроет личку бота
@@ -235,6 +252,8 @@ def load_games():
 
 
 def save(g):
+    if not is_party(g):
+        DIRTY.add(g["chat"])  # экраны игроков обновятся после обработки события (flush)
     db.execute("INSERT OR REPLACE INTO games VALUES (?, ?)", (g["chat"], json.dumps(g, ensure_ascii=False)))
     db.commit()
 
@@ -429,7 +448,7 @@ def cancel_lobby(cq, chat):
         return
     answer(cq, "Набор отменён")
     edit(chat, g["msg"], "🎭 Набор в Мафию отменён. Новый — /mafia или кнопка «Мафия» в меню.")
-    drop(g)
+    close_lobby(g, "✖️ Набор отменён")
 
 
 def join(chat, user):
@@ -516,6 +535,201 @@ def begin(cq, chat):
     if failed:
         send(chat, "⚠️ Не смог написать: " + ", ".join(failed) + ". Откройте личку бота и нажмите «Старт».")
     start_night(g)
+
+
+# ---------- экран в личке (режим «только приложение») ----------
+
+DIRTY = set()  # чаты, у которых изменилась партия
+TOASTS = {}    # uid → короткий ответ на действие из приложения
+FORCE = {}     # uid → чат: прислать экран заново, даже если ничего не изменилось
+FINALS = {}    # (чат, uid) → итоговый экран закончившейся партии (до новой игры в этом чате)
+
+
+def is_member(chat, uid):
+    m = safe("getChatMember", chat_id=chat, user_id=int(uid)) if not is_bot(uid) else None
+    return bool(m) and m.get("status") in ("creator", "administrator", "member", "restricted")
+
+
+def group_title(chat):
+    t = kv_get(f"title:{chat}")
+    if not t:
+        r = safe("getChat", chat_id=chat)
+        t = (r.get("title") if isinstance(r, dict) else None) or "Группа"
+        kv_set(f"title:{chat}", t)
+    return t
+
+
+def screen_view(chat, uid):
+    """Что показывает приложение игроку в этом чате: меню, набор, чужая игра или своя партия."""
+    g = GAMES.get(chat)
+    if not g and (chat, uid) in FINALS:
+        return FINALS[(chat, uid)]
+    base = {"c": chat, "g": ((g or {}).get("title") or group_title(chat))[:40], "me": uid}
+    if not g or is_party(g):
+        return {**base, "st": "menu", "busy": int(bool(g))}
+    if g["status"] == "lobby":
+        return {**base, "st": "lobby", "in": int(uid in g["joined"]), "own": int(uid == g["creator"]),
+                "j": [[u, n[:20], int(is_bot(u))] for u, n in g["joined"].items()],
+                "min": E.MIN_PLAYERS, "max": E.MAX_PLAYERS}
+    if uid not in g["players"]:
+        return {**base, "st": "busy", "np": len(g["players"])}
+    d = app_data(g, uid)
+    d["fd"] = [[w, t[:90]] for _, w, t in g.get("feed", [])[-5:]]
+    d["own"] = int(uid == g["creator"])
+    if g["status"] == "night":
+        d["done"] = [k.split(":")[1] for k in g["night"]["acts"] if k.split(":")[0] == uid]
+    elif g["status"] == "vote":
+        d["my"] = g["votes"].get(uid)
+        d["vc"] = [len(g["votes"]), len(E.voters(g))]
+    elif g["status"] == "day":
+        d["tv"] = [len(g.get("tovote", [])), len(E.voters(g)) // 2 + 1, int(uid in g.get("tovote", []))]
+    return d
+
+
+def screen_text(v):
+    st, t = v["st"], html.escape(v["g"])
+    if st == "menu":
+        return f"🎭 <b>Мафия 18+</b> в «{t}».\nНажмите <b>«🎭 Игра»</b> внизу — там можно начать новую игру."
+    if st == "lobby":
+        return f"🎭 Набор в «{t}»: игроков {len(v['j'])}.\nНабор, боты и старт — в <b>«🎭 Игра»</b> внизу."
+    if st == "busy":
+        return f"🎭 В «{t}» уже идёт партия без вас. Дождитесь конца и начните новую в <b>«🎭 Игра»</b>."
+    if st == "end":
+        return "🏁 <b>Игра окончена.</b> Кто победил и все роли — в <b>«🎭 Игра»</b>."
+    if st == "night":
+        todo = [k for k in v.get("t", {}) if k not in v.get("done", [])]
+        return (f"🌙 <b>Ночь {v['n']}</b> — ваш ход в <b>«🎭 Игра»</b>." if todo
+                else f"🌙 <b>Ночь {v['n']}</b>. Город спит — утром новости в «🎭 Игра».")
+    if st == "day":
+        return f"☀️ <b>День {v['d']}</b> — новости утра и обсуждение в <b>«🎭 Игра»</b>."
+    if st == "vote":
+        return (f"🗳 <b>Голосование</b> — ваш голос в <b>«🎭 Игра»</b>." if v.get("v") and not v.get("my")
+                else "🗳 <b>Голосование</b> идёт — итог в «🎭 Игра».")
+    return "🎭 Откройте «🎭 Игра» внизу."
+
+
+def show(uid, chat, force=False):
+    """Единственное сообщение бота в личке: прошлое удаляем, новое — с обновлённой кнопкой «🎭 Игра».
+    Без звука, если фаза не сменилась."""
+    if is_bot(uid):
+        return
+    view = screen_view(chat, uid)
+    toast = TOASTS.pop(uid, None)
+    url = f"{MAFIA_URL}?v={APP_VER}&d={b64(view)}"
+    try:
+        prev = json.loads(kv_get(f"scr:{uid}", "{}") or "{}")
+    except ValueError:
+        prev = {}
+    key = f"{chat}:{view['st']}:{view.get('n', 0)}:{view.get('d', 0)}"
+    if not force and not toast and prev.get("url") == url:
+        return
+    text = (f"{html.escape(toast)}\n\n" if toast else "") + screen_text(view)
+    if prev.get("id"):
+        safe("deleteMessage", chat_id=uid, message_id=prev["id"])
+    m = send(uid, text, markup={"keyboard": [[{"text": "🎭 Игра", "web_app": {"url": url}}]],
+                                "resize_keyboard": True, "is_persistent": True},
+             force=True, silent=prev.get("key") == key)
+    if m:
+        kv_set(f"scr:{uid}", json.dumps({"id": m["message_id"], "url": url, "key": key}))
+
+
+def flush():
+    """После каждого события: обновить экраны тех, чья партия изменилась, и ответить на действия из приложения."""
+    if not APP_ONLY:
+        DIRTY.clear(), FORCE.clear(), TOASTS.clear()
+        return
+    shown = set()
+    for chat in list(DIRTY):
+        g = GAMES.get(chat)
+        if g and not is_party(g):
+            for u in dict.fromkeys(list(g.get("players", {})) + list(g["joined"])):
+                if not is_bot(u):
+                    show(u, chat)
+                    shown.add(u)
+    for u, chat in list(FORCE.items()):
+        if u not in shown or u in TOASTS:
+            show(u, chat, force=u not in shown)
+    DIRTY.clear()
+    FORCE.clear()
+
+
+def close_lobby(g, toast):
+    """Набор закрыт без игры: всем записавшимся — экран меню."""
+    people = [u for u in g["joined"] if not is_bot(u)]
+    drop(g)
+    for u in people:
+        TOASTS[u] = toast
+        FORCE[u] = g["chat"]
+
+
+def town_say(g, who, line):
+    """Реплика в городе: в приложении — лента дня; в старом режиме — сообщение в группу."""
+    g.setdefault("feed", []).append([now(), who, line])
+    g["feed"] = g["feed"][-20:]
+    if not APP_ONLY and is_bot(who):
+        send(g["chat"], f"🤖 <b>{h(g, who)}</b>: {html.escape(line)}")
+    save(g)
+
+
+def app_entry(uid, chat, user):
+    """Игрок пришёл из меню группы (/start m<чат>): показываем экран Мафии этой группы."""
+    if not chat.startswith("-"):
+        send(uid, "Не понял, из какой группы вы пришли. Нажмите «🎭 Мафия» в меню группы.", force=True)
+        return
+    TOASTS[uid] = f"👋 Привет, {user_name(user)}!"
+    FORCE[uid] = chat
+
+
+def app_action(uid, user, data):
+    """Действие из приложения (набор, старт, «к голосованию», выход…). Ход и голос — в on_webapp."""
+    chat = str(data.get("c", ""))
+    a = data.get("a")
+    FORCE[uid] = chat
+    cq = {"id": None, "from": user, "message": {"chat": {"id": chat}}}
+    g = GAMES.get(chat)
+    if a == "open":
+        for key in [k for k in FINALS if k[0] == chat]:
+            del FINALS[key]  # новая игра — старый итог больше не показываем
+        if g:
+            TOASTS[uid] = "Набор или игра уже идёт"
+        elif not is_member(chat, uid):
+            TOASTS[uid] = "Вы не участник этой группы"
+        else:
+            g = {"chat": chat, "title": group_title(chat), "creator": uid, "status": "lobby", "joined": {uid: user_name(user)},
+                 "deadline": now() + LOBBY_SEC, "night_no": 0, "day_no": 0, "msg": None, "app": True}
+            GAMES[chat] = g
+            save(g)
+            TOASTS[uid] = "✅ Набор открыт, вы в списке. Зовите друзей: «🎭 Мафия» в меню группы."
+    elif a == "join":
+        if not g or is_party(g) or g["status"] != "lobby":
+            TOASTS[uid] = "Набор уже закрыт"
+        elif uid in g["joined"]:
+            TOASTS[uid] = "Вы уже в игре ✅"
+        elif len(g["joined"]) >= E.MAX_PLAYERS:
+            TOASTS[uid] = f"Мест нет: уже {E.MAX_PLAYERS} игроков"
+        elif game_of_user(uid):
+            TOASTS[uid] = "Вы уже участвуете в другой партии"
+        elif not is_member(chat, uid):
+            TOASTS[uid] = "Вы не участник этой группы"
+        else:
+            g["joined"][uid] = user_name(user)
+            save(g)
+            TOASTS[uid] = "✅ Вы в игре! Ждите начала"
+    elif a == "leave":
+        leave(cq, chat)
+    elif a in ("addbot", "delbot"):
+        bot_lobby(cq, chat, a == "addbot")
+    elif a == "begin":
+        begin(cq, chat)
+    elif a == "cancel":
+        cancel_lobby(cq, chat)
+    elif a == "tv":
+        on_tovote(cq, chat)
+    elif a == "stop":
+        stop_cb(cq, chat)
+    elif a == "q":
+        quit_game(g, uid)
+        TOASTS[uid] = "🚪 Вы вышли из игры. Досмотреть партию можно здесь."
 
 
 # ---------- ночь ----------
@@ -688,15 +902,15 @@ def stop_cb(cq, chat):
     stop(chat, cq["from"])
 
 
-def on_webapp(uid, raw):
+def on_webapp(uid, raw, user=None):
     """Ход из мини-приложения «🎭 Игра»: Telegram присылает его боту как сообщение web_app_data."""
     try:
         data = json.loads(raw)
         g = GAMES.get(str(data["c"]))
         if data.get("a") == "v":
             return webapp_vote(g, uid, data)
-        if data.get("a") == "q":
-            return quit_game(g, uid)
+        if data.get("a") not in ("n", None):
+            return app_action(uid, user or {"id": int(uid)}, data)
         acts = dict(data["acts"])
     except (ValueError, KeyError, TypeError):
         send(uid, "Не понял ход из приложения. Выберите кнопками в чате.")
@@ -712,7 +926,11 @@ def on_webapp(uid, raw):
                 "dance": "станцевать для", "booze": "подпоить"}.get(kind, kind)
         report.append(f"{'✅' if ok else '⚠️'} {what}: <b>{h(g, str(target)) if str(target) in g['players'] else '?'}</b>"
                       + ("" if ok else f" — {msg.lower()}"))
-    send(uid, "Ход из приложения:\n" + "\n".join(report))
+    if APP_ONLY:
+        TOASTS[uid] = "\n".join(re.sub(r"</?b>", "", line) for line in report)
+        FORCE[uid] = g["chat"]
+    else:
+        send(uid, "Ход из приложения:\n" + "\n".join(report))
     if g["status"] == "night":
         night_progress(g)
 
@@ -875,6 +1093,10 @@ def webapp_vote(g, uid, data):
     target = str(data.get("t"))
     ok, msg = cast_vote(g, uid, target)
     who = "пропустить" if target == E.SKIP else (h(g, target) if target in g["players"] else "?")
+    if APP_ONLY:
+        TOASTS[uid] = f"{'✅' if ok else '⚠️'} Ваш голос: {html.unescape(who)}" + ("" if ok else f" — {msg.lower()}")
+        FORCE[uid] = g["chat"]
+        return
     send(uid, f"{'✅' if ok else '⚠️'} Ваш голос: <b>{who}</b>" + ("" if ok else f" — {msg.lower()}"))
 
 
@@ -1300,7 +1522,7 @@ def bot_chatter(g):
     talk = g.get("bot_talk", 0)
     g["bot_talk"] = talk + 1
     for b, line in bot_lines(g, talk):
-        send(g["chat"], f"🤖 <b>{h(g, b)}</b>: {html.escape(line)}")
+        town_say(g, b, line)
     if talk == 0 and g["status"] == "day" and bots_alive(g) and g["deadline"] - now() > 45:
         g["bots_at"] = now() + random.uniform(25, 40)
     save(g)
@@ -1327,12 +1549,12 @@ def bot_hear(g, uid, text):
         for t in named[:2]:
             accuse(g, uid, t, 1.0 if sheriff else .6, "claim" if sheriff else "talk")
             if day and is_bot(t) and mem(g, t).get("replied") != g.get("day_no"):
-                send(g["chat"], f"🤖 <b>{h(g, t)}</b>: {html.escape(bot_defend(g, t, uid))}")
+                town_say(g, t, bot_defend(g, t, uid))
     elif day:
         b = next((t for t in named if is_bot(t) and mem(g, t).get("replied") != g.get("day_no")), None)
         if b and random.random() < .6:
             mem(g, b)["replied"] = g.get("day_no")
-            send(g["chat"], f"🤖 <b>{h(g, b)}</b>: {html.escape(say_line(MENTION, g, b, x=nm(g, uid)))}")
+            town_say(g, b, say_line(MENTION, g, b, x=nm(g, uid)))
     save(g)
 
 
@@ -1364,6 +1586,11 @@ def end_game(g, result):
     last = (g.get("events") or [None])[-1]
     news = f" Последнее: {event_text(g, last)}." if last else ""
     push(g, f"🏁 Игра в «{html.escape(g['title'])}» окончена.{news} Кто победил и все роли — «🎭 Игра».")
+    if APP_ONLY:
+        for u in g["players"]:
+            if not is_bot(u):
+                FINALS[(g["chat"], u)] = screen_view(g["chat"], u)
+                show(u, g["chat"], force=True)
     drop(g)
 
 
@@ -1380,8 +1607,9 @@ def stop(chat, user):
         party_end(g, "🏁 <b>Игра окончена.</b>")
     elif g["status"] == "lobby":
         edit(chat, g["msg"], "🎭 Набор в Мафию отменён.")
-        drop(g)
-        send(chat, "Набор отменён.")
+        close_lobby(g, "✖️ Набор отменён")
+        if not APP_ONLY:
+            send(chat, "Набор отменён.")
     else:
         end_game(g, "stop")
 
@@ -1553,8 +1781,14 @@ def app_link(mode):
     return f"https://t.me/{BOT}?startapp={mode}" if _app_check[1] else f"{APP_URL}?mode={mode}"
 
 
-def menu_rows():
-    return [[{"text": "🎭 Мафия 18+", "callback_data": "gm:mafia"}],
+def mafia_link(chat):
+    return f"https://t.me/{BOT}?start=m{chat}"
+
+
+def menu_rows(chat=None):
+    mafia = ({"text": "🎭 Мафия 18+", "url": mafia_link(chat)} if APP_ONLY and chat
+             else {"text": "🎭 Мафия 18+", "callback_data": "gm:mafia"})
+    return [[mafia],
             [{"text": "🐊 Крокодил", "url": app_link("croc")},
              {"text": "🚫 Табу", "url": app_link("tabu")}],
             [{"text": "📜 Правила", "callback_data": "gm:rules"}]]
@@ -1563,12 +1797,12 @@ def menu_rows():
 def send_app_button(chat, mode):
     name = {"croc": "🐊 Крокодил", "tabu": "🚫 Табу"}[mode]
     send(chat, f"<b>{name}</b> — играем на одном телефоне, передавая его по кругу: карточки, таймер, счёт команд.",
-         [[{"text": f"▶️ Открыть {name[2:]}", "url": app_link(mode)}]])
+         [[{"text": f"▶️ Открыть {name[2:]}", "url": app_link(mode)}]], force=True)
 
 
 def games_menu(chat):
     """Меню с кнопками игр; если у бота есть право — закрепляет его вместо прошлого меню."""
-    m = send(chat, MENU_TEXT, menu_rows())
+    m = send(chat, MENU_TEXT, menu_rows(chat), force=True)
     if not m:
         return
     old = kv_get(f"menu:{chat}")
@@ -1582,6 +1816,9 @@ def menu_callback(cq, game):
     chat = cq["message"]["chat"]
     cid, title, user = str(chat["id"]), chat.get("title") or "Игра", cq["from"]
     answer(cq)
+    if game == "mafia" and APP_ONLY:
+        answer(cq, url=mafia_link(cid))  # Telegram откроет личку бота, там — кнопка «🎭 Игра»
+        return
     if game == "mafia":
         open_lobby(cid, title, user)
     elif game in ("croc", "tabu"):  # кнопки из старых закреплённых меню
@@ -1594,6 +1831,13 @@ def menu_callback(cq, game):
 # ---------- таймеры ----------
 
 def tick():
+    try:
+        _tick()
+    finally:
+        flush()
+
+
+def _tick():
     for g in list(GAMES.values()):
         if g.get("bots_at") and now() >= g["bots_at"] and not is_party(g):
             try:
@@ -1618,7 +1862,7 @@ def tick():
                 party_timeout(g)
             elif st == "lobby":
                 edit(g["chat"], g["msg"], "🎭 Набор закрыт: за 30 минут игру так и не начали. /mafia — открыть снова.")
-                drop(g)
+                close_lobby(g, "⏰ Набор закрыт: за 30 минут игру так и не начали")
             elif st == "night":
                 finish_night(g)
             elif st == "day":
@@ -1654,18 +1898,28 @@ def on_message(m):
         uid = str(chat["id"])
         if text.startswith("/start"):
             arg = text.split(maxsplit=1)[1] if " " in text else ""
-            if arg.startswith("join_"):
+            if arg.startswith("m") and APP_ONLY:
+                safe("deleteMessage", chat_id=uid, message_id=m.get("message_id"))
+                app_entry(uid, arg[1:], user)
+            elif arg.startswith("join_") and APP_ONLY:
+                safe("deleteMessage", chat_id=uid, message_id=m.get("message_id"))
+                app_entry(uid, arg[5:], user)
+            elif arg.startswith("join_"):
                 join(arg[5:], user)
             else:
                 send(uid, GREETING)
         elif text.startswith("/rules"):
             send(uid, T.RULES + T.DEV)
         elif m.get("web_app_data"):
-            on_webapp(uid, m["web_app_data"].get("data", ""))
+            if APP_ONLY:  # служебное «данные из приложения» в личке не копим
+                safe("deleteMessage", chat_id=uid, message_id=m.get("message_id"))
+            on_webapp(uid, m["web_app_data"].get("data", ""), user)
         elif text:
             relay_mafia(uid, text)
         return
     cid = str(chat["id"])
+    if chat.get("title"):
+        kv_set(f"title:{cid}", chat["title"])
     if any((u.get("username") or "").lower() == BOT.lower() for u in m.get("new_chat_members", [])):
         games_menu(cid)  # бота только что добавили в группу
         return
@@ -1677,7 +1931,12 @@ def on_message(m):
                 and not g["players"][str(user.get("id"))]["alive"]:
             safe("deleteMessage", chat_id=cid, message_id=m["message_id"])  # мёртвые молчат (если бот админ)
         elif g and g["status"] in ("day", "vote") and text:
-            bot_hear(g, str(user.get("id")), text)  # боты слушают обсуждение (нужен /setprivacy → Disable)
+            uid = str(user.get("id"))
+            if APP_ONLY and uid in E.alive(g):
+                g.setdefault("feed", []).append([now(), uid, text[:200]])  # обсуждение группы — и в ленте приложения
+                g["feed"] = g["feed"][-20:]
+                save(g)
+            bot_hear(g, uid, text)  # боты слушают обсуждение (нужен /setprivacy → Disable)
         return
     head = text.split()[0]
     cmd, _, target = head.partition("@")
@@ -1687,6 +1946,9 @@ def on_message(m):
     title = chat.get("title") or "Игра"
     if cmd in ("/games", "/menu"):
         games_menu(cid)
+    elif cmd == "/mafia" and APP_ONLY:
+        send(cid, "🎭 <b>Мафия 18+</b> — вся игра в приложении: набор, роли, ходы, голосование.",
+             [[{"text": "🎭 Играть в Мафию", "url": mafia_link(cid)}]], force=True)
     elif cmd == "/mafia":
         open_lobby(cid, title, user)
     elif cmd in ("/krokodil", "/croc"):
@@ -1713,9 +1975,9 @@ def relay_mafia(uid, text):
     if g and g["status"] != "lobby" and uid in g["players"] and g["players"][uid]["alive"] and E.is_mafia(g, uid):
         mates = [v for v in mafia_alive(g) if v != uid]
         if not mates:
-            send(uid, "В семье вы один — переписываться не с кем.")
+            send(uid, "В семье вы один — переписываться не с кем.", force=True)
         for v in mates:
-            send(v, f"🔪 <b>{h(g, uid)}</b>: {html.escape(text)}")
+            send(v, f"🔪 <b>{h(g, uid)}</b>: {html.escape(text)}", force=True)
     elif not g:
         send(uid, "Я понимаю команды и кнопки. Правила — /rules")
 
@@ -1753,10 +2015,13 @@ def on_callback(cq):
 
 
 def handle(update):
-    if "callback_query" in update:
-        on_callback(update["callback_query"])
-    elif "message" in update:
-        on_message(update["message"])
+    try:
+        if "callback_query" in update:
+            on_callback(update["callback_query"])
+        elif "message" in update:
+            on_message(update["message"])
+    finally:
+        flush()
 
 
 # ---------- Windows: один экземпляр и запрет сна ----------

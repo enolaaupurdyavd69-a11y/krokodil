@@ -47,6 +47,7 @@ class GroupFlow(unittest.TestCase):
         B.LOG_PATH = B.DATA / "bot.log"
         B.db_init(B.DATA / "test.db")
         B.GAMES.clear()
+        B.APP_ONLY = True
         B.BOT = "krokodil_party_18_bot"
         self.tg = FakeTelegram()
         B.api = B.api_upload = self.tg
@@ -127,7 +128,7 @@ class GroupFlow(unittest.TestCase):
     def test_one_game_per_chat_and_pass(self):
         self.say(1, "/krokodil_chat")
         self.say(1, "/mafia")
-        self.assertIn("уже идёт", self.group_text())
+        self.assertIn("в приложении", self.group_text(), "Мафия только открывается кнопкой — набор в приложении")
         self.say(1, "/tabu_chat")
         self.assertIn("уже идёт", self.group_text())
         self.press(2, f"pl:{GROUP}")
@@ -151,8 +152,9 @@ class GroupFlow(unittest.TestCase):
         menu = self.tg.to(GROUP)[-1]
         self.assertIn("Во что играем", menu["text"])
         buttons = [b.get("callback_data") or b["url"] for row in menu["reply_markup"]["inline_keyboard"] for b in row]
-        self.assertEqual(buttons, ["gm:mafia", B.APP_URL + "?mode=croc", B.APP_URL + "?mode=tabu", "gm:rules"],
-                         "без мини-приложения в BotFather — ссылки на сайт")
+        self.assertEqual(buttons, [f"https://t.me/krokodil_party_18_bot?start=m{GROUP}", B.APP_URL + "?mode=croc",
+                                   B.APP_URL + "?mode=tabu", "gm:rules"],
+                         "Мафия — в личку бота к кнопке «🎭 Игра»; без мини-приложения в BotFather — ссылки на сайт")
         pins = [p for m, p in self.tg.sent if m == "pinChatMessage"]
         self.assertEqual(len(pins), 1)
         # повторное /games: прошлое меню открепляется, новое закрепляется
@@ -161,12 +163,9 @@ class GroupFlow(unittest.TestCase):
                          ["unpinChatMessage", "pinChatMessage"])
         self.say(3, "/krokodil_chat")
         self.assertEqual(B.GAMES[GROUP]["mode"], "croc")
-        self.press(3, "gm:mafia")
-        self.assertIn("уже идёт", self.group_text(), "кнопка не ломает идущую игру")
-        self.say(3, "/stop")  # закончить может тот, кто начал игру кнопкой
-        self.press(4, "gm:mafia")
-        self.assertEqual(B.GAMES[GROUP]["status"], "lobby")
-        self.assertEqual(B.GAMES[GROUP]["creator"], "4", "набор открыл нажавший кнопку")
+        self.press(3, "gm:mafia")  # кнопка из старого закреплённого меню — ведёт к приложению, игру не трогает
+        self.assertIn(f"start=m{GROUP}", self.last_answer().get("url", ""))
+        self.assertEqual(B.GAMES[GROUP]["mode"], "croc", "кнопка не ломает идущую игру")
 
     def test_survives_restart(self):
         self.say(1, "/krokodil_chat")
