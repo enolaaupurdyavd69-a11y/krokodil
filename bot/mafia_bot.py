@@ -10,6 +10,7 @@ import html
 import random
 import io
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -544,9 +545,8 @@ def finish_night(g):
         if key not in g["night"]["acts"]:
             edit(key.split(":")[0], mid, "⏰ Время вышло, ход пропущен.")
     res = E.resolve_night(g)
+    bot_learn(g, res)
     for actor, target, kind, ok in res["checks"]:
-        if is_bot(actor) and ok and kind == E.CHECK:  # комиссар-бот запоминает найденную мафию
-            g.setdefault("botmem", {}).setdefault(actor, {})["found"] = target
         if kind == E.CHECK:
             send(actor, f"🕵️ {h(g, target)} — " + ("<b>МАФИЯ!</b>" if ok else "не мафия."))
         else:
@@ -582,7 +582,8 @@ def start_day(g):
     g["day_no"] += 1
     g["deadline"] = now() + DAY_SEC
     g["tovote"] = []
-    g["bots_at"] = now() + random.uniform(10, 30) if bots_alive(g) else None  # реплика бота в чате
+    g["bot_talk"] = 0
+    g["bots_at"] = now() + random.uniform(10, 25) if bots_alive(g) else None  # реплики ботов в чате
     a = E.alive(g)
     m = send(g["chat"], T.DAY.format(n=g["day_no"], count=len(a), names=", ".join(h(g, u) for u in a), sec=DAY_SEC),
              [[{"text": "🗳 К голосованию", "callback_data": f"tv:{g['chat']}"}]])
@@ -635,8 +636,8 @@ def vote_rows(g):
 
 
 def start_vote(g):
-    if g["status"] == "day" and g.get("bots_at"):
-        bot_chatter(g)  # день оборвали раньше — бот всё равно успевает высказаться
+    if g["status"] == "day" and bots_alive(g) and not g.get("bot_talk"):
+        bot_chatter(g)  # день оборвали раньше — боты всё равно успевают высказаться
     if g.get("day_msg"):
         safe("editMessageReplyMarkup", chat_id=g["chat"], message_id=g["day_msg"], reply_markup=kb([]))
     E.start_vote(g)
@@ -705,31 +706,257 @@ def finish_vote(g):
 
 
 # ---------- боты-игроки ----------
+# Хитрость ботов. Открытый «блокнот города» g["intel"]: кто кого обвинил и кто назвался комиссаром,
+# плюс роли погибших (их раскрывают). Сверху — только то, что знает роль бота: проверки комиссара,
+# глаза вуайериста, своя семья у мафии. Чужих тайн боты не подглядывают.
 
-BOT_CHATTER = ["Я мирный, честно-честно.", "Что-то {x} подозрительно молчит…", "{x}, а ты где был ночью?",
-               "Голосую за {x}, интуиция подсказывает.", "Мне кажется, мафия среди тех, кто громче всех шутит.",
-               "Давайте не торопиться, у меня алиби: я спал.", "{x} слишком хорошо всё объясняет. Не верю."]
+FEMALE = {"Жанна", "Снежана", "Кристина", "Анжела", "Изольда", "Лариса", "Милана"}
+
+# Имена в репликах только в именительном падеже — склонять чужие имена бот не умеет.
+BOT_CHATTER = ["Я мирн{yi}, честно-честно.", "Что-то {x} подозрительно молчит…", "{x}, а где ты был(а) ночью?",
+               "Мне кажется, мафия среди тех, кто громче всех шутит.", "Давайте не торопиться, у меня алиби: я спал{a}.",
+               "{x} слишком хорошо всё объясняет. Не верю.", "Кто сегодня ещё ни разу не высказался? Вот там и ищите."]
+CLAIM_FOUND = ["Скрываться больше нет смысла: я комиссар. {x} — мафия, проверено этой ночью! Голосуем.",
+               "Я комиссар. Ночная проверка: {x} — мафия. Доктор, прикрой меня."]
+CLAIM_COUNTER = ["Стоп! Комиссар — это я. А {x} нагло врёт: по моей проверке {x} — мафия.",
+                 "Не верьте! {x} — не комиссар, а мафия. Настоящий комиссар — я."]
+SHERIFF_DEFEND = ["{x} врёт — настоящий комиссар здесь я. Мои проверки: {y}.",
+                  "{x} выдаёт себя за меня. Комиссар — я, проверено: {y}."]
+SEEN = ["Раскроюсь: я вуайерист. Этой ночью подглядывал{a} за жертвой ({t}). В гости заходили: {y}. Думайте.",
+        "Я всё видел{a}! Перед смертью ({t}) в гости приходили: {y}."]
+SUSPECT = ["{x} мне не нравится: {why}. Голосую.", "Мой кандидат — {x}. Причина: {why}.",
+           "Подозреваю: {x} — {why}."]
+DENY_TOWN = ["Я мирн{yi}! {x}, ты мимо.", "{x}, ну и логика… Казните меня — потеряете мирного.",
+             "Не я! {x}, лучше присмотрись к тем, кто молчит."]
+DENY_MAFIA = ["Я?! А может, это {x} отводит подозрения от себя? Я голосую за другого — за {x}.",
+              "{x}, смешно. Кто громче всех кричит «мафия» — тот обычно ею и оказывается."]
+DOCTOR_REVEAL = ["Ладно, раскроюсь: я доктор. Казните меня — лечить будет некому."]
+MENTION = ["Я тут. Ночью спал{a}, ничего не видел{a}.", "{x}, я за справедливость. Ищем мафию вместе.",
+           "{x}, а почему ты спрашиваешь? Подозрительно…"]
+
+ACCUSE_WORDS = ("маф", "голосу", "подозр", "казн", "врет", "убий", "дон")
+CLAIM_RE = re.compile(r"(^|\W)я\s*[-—–,]?\s*(комиссар|шериф|коп)")
 
 
 def bots_alive(g):
     return [u for u in E.alive(g) if is_bot(u)]
 
 
+def intel(g):
+    return g.setdefault("intel", {"acc": [], "claims": {}})
+
+
+def mem(g, b):
+    return g.setdefault("botmem", {}).setdefault(b, {})
+
+
+def nm(g, u):
+    """Имя для реплики — без пометки «(бот)»."""
+    return g["players"][u]["name"].replace(" (бот)", "")
+
+
+def forms(g, b):
+    fem = nm(g, b).split()[0] in FEMALE
+    return {"a": "а" if fem else "", "yi": "ая" if fem else "ый"}
+
+
+def say_line(lines, g, b, **kw):
+    """Случайная реплика, которую этот бот ещё не говорил (пока такие есть)."""
+    said = mem(g, b).setdefault("said", [])
+    fresh = [x for x in lines if x not in said] or lines
+    line = random.choice(fresh)
+    said.append(line)
+    return line.format(**forms(g, b), **kw)
+
+
+def town_alive(g):
+    return [u for u in E.alive(g) if not E.is_mafia(g, u)]
+
+
+def accuse(g, a, t, w, kind):
+    if a != t and t in g["players"]:
+        intel(g)["acc"].append({"a": a, "t": t, "w": w, "k": kind, "d": g.get("day_no", 0)})
+
+
+def claim(g, u):
+    intel(g)["claims"].setdefault(u, g.get("day_no", 0))
+
+
+def revealed(g, u):
+    """Роль известна всем только у погибших."""
+    p = g["players"][u]
+    return None if p["alive"] else p["role"]
+
+
+def bad_role(role):
+    return role in E.MAFIA_TEAM or role == E.MANIAC
+
+
+def trust(g, a):
+    """Насколько город верит словам игрока: по раскрытым ролям и по тому, сбывались ли его обвинения."""
+    r = revealed(g, a)
+    if r == E.SHERIFF:
+        return 3.0
+    if r and bad_role(r):
+        return -1.0
+    t, claims = 1.0, intel(g)["claims"]
+    if a in claims:
+        rivals = [c for c in claims if c != a and revealed(g, c) in (None, E.SHERIFF)]
+        t += .3 if rivals else 1.5
+    for x in intel(g)["acc"]:
+        if x["a"] == a and revealed(g, x["t"]):
+            t += 1.0 if bad_role(revealed(g, x["t"])) else (-1.5 if x["k"] == "claim" else -.5)
+    return max(t, -1.0)
+
+
+def suspicion(g):
+    """Подозрения по открытым сведениям: обвинения с весом доверия к обвинителю;
+    кто обвинял погибшего мирного — сам под подозрением; два «комиссара» — один врёт."""
+    s = {u: 0.0 for u in E.alive(g)}
+    tr = {}
+    for x in intel(g)["acc"]:
+        a, t = x["a"], x["t"]
+        if a not in tr:
+            tr[a] = trust(g, a)
+        if t in s:
+            s[t] += x["w"] * tr[a]
+        elif a in s and revealed(g, t) and not bad_role(revealed(g, t)):
+            s[a] += 2.5 if x["k"] == "claim" else .8
+    claimers = [c for c in intel(g)["claims"] if c in s]
+    if len(claimers) > 1:
+        for c in claimers:
+            s[c] += 1.0
+    return s
+
+
+def why(g, t, speaker):
+    """Почему подозревают t — для реплики бота (на собственные слова бот не ссылается)."""
+    best, text = 0, ""
+    for x in intel(g)["acc"]:
+        if x["t"] == t and x["a"] not in (t, speaker):
+            score = x["w"] * trust(g, x["a"])
+            if score > best:
+                best = score
+                text = {"claim": f"по словам «комиссара» ({nm(g, x['a'])}), это мафия",
+                        "seen": f"{nm(g, x['a'])} видел(а) этого игрока у жертвы"}.get(x["k"], f"{nm(g, x['a'])} тоже так думает")
+        elif x["a"] == t and revealed(g, x["t"]) and not bad_role(revealed(g, x["t"])) and not text:
+            text = f"после этих обвинений погиб(ла) {nm(g, x['t'])}, а это был(а) {E.ROLE_NAMES[revealed(g, x['t'])].lower()}"
+    return text or random.choice(["слишком спокойно себя ведёт", "путается в словах", "всё время уводит разговор"])
+
+
+def town_pick(g, b, pool):
+    """Самый подозрительный по открытым сведениям — или None, если явного подозреваемого нет."""
+    m = mem(g, b)
+    pool = [t for t in pool if t not in m.get("clean", [])] or pool
+    if g["players"][b]["role"] == E.WIFE:
+        pool = [t for t in pool if t != g.get("husband")] or pool
+    s = suspicion(g)
+    best = max((s.get(t, 0) for t in pool), default=0)
+    if best < 1.0:
+        return None
+    return random.choice([t for t in pool if s.get(t, 0) >= best - .3])
+
+
+def mafia_vote_target(g):
+    """Цель семьи на сегодня: кто вышел на мафию, кого подставил «комиссар»-мафиози, кого и так топят."""
+    mm = mem(g, "_maf")
+    if (mm.get("vote") or [None])[0] == g.get("day_no") and mm["vote"][1] in E.alive(g):
+        return mm["vote"][1]
+    town = town_alive(g)
+    if not town:
+        return E.SKIP
+    danger = [x["a"] for x in intel(g)["acc"]
+              if x["a"] in town and x["t"] in E.alive(g) and E.is_mafia(g, x["t"])]
+    s = suspicion(g)
+    best = max(s.get(u, 0) for u in town)
+    lead = [u for u, _ in Counter(v for v in g.get("votes", {}).values() if v in town).most_common(1)]
+    if danger:
+        t = Counter(danger).most_common(1)[0][0]
+    elif mm.get("framed") in town:
+        t = mm["framed"]
+    elif best >= .5:
+        t = random.choice([u for u in town if s.get(u, 0) >= best - .3])
+    else:
+        t = lead[0] if lead else random.choice(town)
+    mm["vote"] = [g.get("day_no"), t]
+    return t
+
+
+def mafia_kill_target(g, targets):
+    mm = mem(g, "_maf")
+    if mm.get("sheriff") in targets:
+        return mm["sheriff"]  # дон нашёл комиссара
+    claimers = [c for c in intel(g)["claims"] if c in targets]
+    if claimers:
+        return random.choice(claimers)
+    danger = [x["a"] for x in intel(g)["acc"]
+              if x["a"] in targets and x["t"] in E.alive(g) and E.is_mafia(g, x["t"])]
+    if danger:
+        return Counter(danger).most_common(1)[0][0]
+    s = suspicion(g)
+    trusted = sorted(targets, key=lambda u: s.get(u, 0))
+    return random.choice(trusted[:max(1, len(trusted) // 2)])  # убирают тех, кому город верит
+
+
 def bot_target(g, b, kind, targets):
-    """Ход бота ночью: мафия поддерживает выбор семьи, комиссар не проверяет одних и тех же."""
+    """Ночной ход бота по его роли и открытым сведениям."""
     if kind == E.KILL:
         votes = [t for k, t in g["night"]["acts"].items() if k.endswith(":" + E.KILL) and t in targets]
         if votes:
-            return Counter(votes).most_common(1)[0][0]
-    mem = g.setdefault("botmem", {}).setdefault(b, {})
+            return Counter(votes).most_common(1)[0][0]  # поддержать выбор семьи
+        return mafia_kill_target(g, targets)
+    m, s = mem(g, b), suspicion(g)
+    claimers = [c for c in intel(g)["claims"] if c in targets]
+    top = max(targets, key=lambda t: s.get(t, 0))
     if kind in (E.CHECK, E.DON_CHECK):
-        fresh = [t for t in targets if t not in mem.get("checked", [])]
-        t = random.choice(fresh or targets)
-        mem.setdefault("checked", []).append(t)
+        fresh = [t for t in targets if t not in m.get("checked", [])] or targets
+        if kind == E.CHECK:
+            top = max(fresh, key=lambda t: s.get(t, 0))
+            t = top if s.get(top, 0) >= 1 and random.random() < .7 else random.choice(fresh)
+        else:
+            unchecked = [c for c in claimers if c in fresh]
+            t = random.choice(unchecked) if unchecked and random.random() < .7 else random.choice(fresh)
+        m.setdefault("checked", []).append(t)
         return t
-    if kind == E.HEAL and b in targets and random.random() < .3:
-        return b
+    if kind == E.HEAL:
+        others = [c for c in claimers if c != b]
+        if others and random.random() < .7:
+            return random.choice(others)  # прикрыть объявившегося комиссара
+        if b in targets and (s.get(b, 0) >= 1.5 or random.random() < .25):
+            return b
+        trusted = sorted(targets, key=lambda u: s.get(u, 0))
+        return random.choice(trusted[:max(1, len(trusted) // 2)])
+    if kind in (E.VISIT, E.DANCE):
+        return top if s.get(top, 0) >= 1 and random.random() < .75 else random.choice(targets)
+    if kind == E.BOOZE:
+        sheriff = mem(g, "_maf").get("sheriff")
+        if sheriff in targets:
+            return sheriff
+        return random.choice(claimers) if claimers else random.choice(targets)
+    if kind == E.WATCH:  # мафия любит убивать тех, кому верят, — за ними и подглядываем
+        if claimers and random.random() < .5:
+            return random.choice(claimers)
+        trusted = sorted(targets, key=lambda u: s.get(u, 0))
+        return random.choice(trusted[:max(1, len(trusted) // 2)])
+    if kind == E.MANIAC_KILL and claimers and random.random() < .5:
+        return random.choice(claimers)
     return random.choice(targets)
+
+
+def bot_learn(g, res):
+    """После ночи: что узнали боты (и семья мафии) из своих ночных ходов."""
+    for actor, target, kind, ok in res["checks"]:
+        if kind == E.DON_CHECK and ok:
+            mem(g, "_maf")["sheriff"] = target  # дон расскажет семье
+        elif kind == E.CHECK and is_bot(actor):
+            m = mem(g, actor)
+            if ok:
+                m["found"] = target
+            else:
+                m.setdefault("clean", []).append(target)
+    if res["watch"] and is_bot(res["watch"][0]):
+        voyeur, target, seen = res["watch"]
+        mem(g, voyeur)["seen"] = [g.get("night_no"), target, seen]
 
 
 def bots_night(g):
@@ -750,17 +977,21 @@ def night_progress(g):
 
 def bot_vote_target(g, b):
     a = [t for t in E.alive(g) if t != b]
-    found = g.get("botmem", {}).get(b, {}).get("found")
+    if E.is_mafia(g, b):
+        t = mafia_vote_target(g)
+        return t if t in a else random.choice([u for u in a if not E.is_mafia(g, u)] or a)
+    found = mem(g, b).get("found")
     if found in a:
         return found
-    count = Counter(t for t in g["votes"].values() if t != E.SKIP and t in a)
-    if E.is_mafia(g, b):
-        pool = [t for t in a if not E.is_mafia(g, t)] or a
-        lead = [t for t, _ in count.most_common() if t in pool]
-        return lead[0] if lead and random.random() < .7 else random.choice(pool)
-    if count and random.random() < .5:
+    t = town_pick(g, b, a)
+    if t:
+        return t
+    clean = mem(g, b).get("clean", [])
+    count = Counter(t for t in g["votes"].values() if t != E.SKIP and t in a and t not in clean)
+    r = random.random()
+    if count and r < .45:
         return count.most_common(1)[0][0]
-    return E.SKIP if random.random() < .15 else random.choice(a)
+    return E.SKIP if r < .75 else random.choice(a)
 
 
 def bots_vote(g):
@@ -775,16 +1006,144 @@ def bots_vote(g):
         edit(g["chat"], g.get("vote_msg"), vote_text(g), vote_rows(g))
 
 
+def fake_claim(g, b, x, lines):
+    """Мафиози-бот выдаёт себя за комиссара и подставляет x."""
+    claim(g, b)
+    accuse(g, b, x, 1.0, "claim")
+    mm = mem(g, "_maf")
+    mm["faked"], mm["framed"] = b, x
+    return say_line(lines, g, b, x=nm(g, x))
+
+
+def bot_defend(g, b, accuser):
+    """Ответ бота на обвинение."""
+    m, r, x = mem(g, b), g["players"][b]["role"], nm(g, accuser)
+    m["replied"] = g.get("day_no")
+    if r == E.SHERIFF:
+        claim(g, b)
+        accuse(g, b, accuser, .8, "claim")
+        found = m.get("found")
+        if found in E.alive(g):
+            accuse(g, b, found, 1.0, "claim")
+            return say_line(SHERIFF_DEFEND, g, b, x=x, y=f"{nm(g, found)} — мафия")
+        clean = [nm(g, c) for c in m.get("clean", [])]
+        return say_line(SHERIFF_DEFEND, g, b, x=x, y=(", ".join(clean) + " — чисты") if clean else "пока пусто")
+    if E.is_mafia(g, b):
+        if accuser in intel(g)["claims"] and not mem(g, "_maf").get("faked") and random.random() < .7:
+            return fake_claim(g, b, accuser, CLAIM_COUNTER)
+        accuse(g, b, accuser, .6, "talk")
+        return say_line(DENY_MAFIA, g, b, x=x)
+    if r == E.DOCTOR and suspicion(g).get(b, 0) >= 2:
+        return say_line(DOCTOR_REVEAL, g, b)
+    accuse(g, b, accuser, .3, "talk")
+    return say_line(DENY_TOWN, g, b, x=x)
+
+
+def bot_opinion(g, b):
+    others = [t for t in E.alive(g) if t != b]
+    if E.is_mafia(g, b):
+        t = mafia_vote_target(g)
+        pool = [u for u in others if not E.is_mafia(g, u)] or others
+    else:
+        t = mem(g, b).get("found") if mem(g, b).get("found") in others else town_pick(g, b, others)
+        pool = others
+    if t in others:
+        accuse(g, b, t, .4, "talk")
+        return say_line(SUSPECT, g, b, x=nm(g, t), why=why(g, t, b))
+    return say_line(BOT_CHATTER, g, b, x=nm(g, random.choice(pool)))
+
+
+def bot_lines(g, talk):
+    """Реплики ботов днём. Первая волна — заявления (комиссар, вуайерист, блеф мафии) и мнения,
+    вторая — ответы на обвинения."""
+    out, spoke = [], set()
+    alive, bots, it, mm = E.alive(g), bots_alive(g), intel(g), mem(g, "_maf")
+    random.shuffle(bots)
+
+    def say(b, text):
+        out.append((b, text))
+        spoke.add(b)
+
+    if talk == 0:
+        for b in bots:
+            m, r = mem(g, b), g["players"][b]["role"]
+            if r == E.SHERIFF and m.get("found") in alive and m.get("told") != m["found"]:
+                claim(g, b)
+                accuse(g, b, m["found"], 1.0, "claim")
+                m["told"] = m["found"]
+                say(b, say_line(CLAIM_FOUND, g, b, x=nm(g, m["found"])))
+            elif r == E.VOYEUR and m.get("seen") and m["seen"][0] == g.get("night_no") \
+                    and not g["players"][m["seen"][1]]["alive"]:
+                seen = [v for v in m["seen"][2] if v != b and v in alive]
+                if seen:
+                    for v in seen:
+                        accuse(g, b, v, .8, "seen")
+                    say(b, say_line(SEEN, g, b, t=nm(g, m["seen"][1]), y=", ".join(nm(g, v) for v in seen)))
+        liars = [b for b in bots if E.is_mafia(g, b) and b not in spoke]
+        if liars and not mm.get("faked"):
+            real = [x for x in it["acc"] if x["k"] == "claim" and x["a"] in alive and not E.is_mafia(g, x["a"])
+                    and x["t"] in alive and E.is_mafia(g, x["t"])]
+            if real and random.random() < .8:  # комиссар вышел на семью — объявить его лжецом
+                liar = real[-1]["t"] if real[-1]["t"] in liars else liars[0]
+                say(liar, fake_claim(g, liar, real[-1]["a"], CLAIM_COUNTER))
+            elif not it["claims"] and g.get("day_no", 0) >= 2 and random.random() < .35 and town_alive(g):
+                say(liars[0], fake_claim(g, liars[0], random.choice(town_alive(g)), CLAIM_FOUND))
+    else:
+        for x in reversed(it["acc"]):
+            b = x["t"]
+            if len(out) < 2 and x["d"] == g.get("day_no") and b in bots and b not in spoke and x["a"] in alive \
+                    and mem(g, b).get("replied") != g.get("day_no"):
+                say(b, bot_defend(g, b, x["a"]))
+    for b in bots:
+        if len(out) >= (3 if talk == 0 else 2):
+            break
+        if b not in spoke and mem(g, b).get("opined") != g.get("day_no") and random.random() < .6:
+            mem(g, b)["opined"] = g.get("day_no")
+            say(b, bot_opinion(g, b))
+    if not out and bots and talk == 0:
+        say(bots[0], bot_opinion(g, bots[0]))
+    return out
+
+
 def bot_chatter(g):
+    """Волна реплик ботов днём; после первой — через полминуты вторая (ответы на обвинения)."""
     g["bots_at"] = None
-    bots = bots_alive(g)
-    if bots:
-        b = random.choice(bots)
-        found = g.get("botmem", {}).get(b, {}).get("found")
-        others = [t for t in E.alive(g) if t != b]
-        line = (f"Я кое-что знаю: {g['players'][found]['name']} — мафия! Голосуйте за него."
-                if found in others else random.choice(BOT_CHATTER).format(x=g["players"][random.choice(others)]["name"]))
+    talk = g.get("bot_talk", 0)
+    g["bot_talk"] = talk + 1
+    for b, line in bot_lines(g, talk):
         send(g["chat"], f"🤖 <b>{h(g, b)}</b>: {html.escape(line)}")
+    if talk == 0 and g["status"] == "day" and bots_alive(g) and g["deadline"] - now() > 45:
+        g["bots_at"] = now() + random.uniform(25, 40)
+    save(g)
+
+
+def name_key(g, u):
+    w = re.sub(r"[^а-яa-z]", "", nm(g, u).split()[0].lower().replace("ё", "е")) if nm(g, u).split() else ""
+    return w[:max(3, len(w) - 1)] if len(w) >= 3 else None
+
+
+def bot_hear(g, uid, text):
+    """Сообщение живого игрока в группе: боты запоминают обвинения и «я комиссар» и отвечают, если их назвали."""
+    if is_bot(uid) or uid not in E.alive(g):
+        return
+    low = text.lower().replace("ё", "е")
+    if CLAIM_RE.search(low):
+        claim(g, uid)
+    named = [u for u in E.alive(g) if u != uid and name_key(g, u) and name_key(g, u) in low]
+    if not named:
+        return
+    day = g["status"] == "day"
+    if any(w in low for w in ACCUSE_WORDS):
+        sheriff = uid in intel(g)["claims"]
+        for t in named[:2]:
+            accuse(g, uid, t, 1.0 if sheriff else .6, "claim" if sheriff else "talk")
+            if day and is_bot(t) and mem(g, t).get("replied") != g.get("day_no"):
+                send(g["chat"], f"🤖 <b>{h(g, t)}</b>: {html.escape(bot_defend(g, t, uid))}")
+    elif day:
+        b = next((t for t in named if is_bot(t) and mem(g, t).get("replied") != g.get("day_no")), None)
+        if b and random.random() < .6:
+            mem(g, b)["replied"] = g.get("day_no")
+            send(g["chat"], f"🤖 <b>{h(g, b)}</b>: {html.escape(say_line(MENTION, g, b, x=nm(g, uid)))}")
     save(g)
 
 
@@ -1127,6 +1486,8 @@ def on_message(m):
         elif g and g["status"] != "lobby" and str(user.get("id")) in g.get("players", {}) \
                 and not g["players"][str(user.get("id"))]["alive"]:
             safe("deleteMessage", chat_id=cid, message_id=m["message_id"])  # мёртвые молчат (если бот админ)
+        elif g and g["status"] in ("day", "vote") and text:
+            bot_hear(g, str(user.get("id")), text)  # боты слушают обсуждение (нужен /setprivacy → Disable)
         return
     head = text.split()[0]
     cmd, _, target = head.partition("@")

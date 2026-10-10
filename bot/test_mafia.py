@@ -489,6 +489,69 @@ class BotFlow(unittest.TestCase):
         for _ in range(20):
             self.assertEqual(B.bot_target(st, "2", E.KILL, targets), "6", "бот-мафиози поддерживает семью")
 
+    def smart_game(self, roles):
+        """Партия из ботов b1…bN с заданными ролями — для проверки «мозгов»."""
+        st = E.new_game({f"b{i}": f"Бот{i}" for i in range(1, len(roles) + 1)})
+        for i, r in enumerate(roles, 1):
+            st["players"][f"b{i}"]["role"] = r
+        st.update(chat=GROUP, day_no=1, night_no=1, status="day", deadline=self.clock[0] + 100)
+        return st
+
+    def test_smart_sheriff_reveals_and_town_follows(self):
+        st = self.smart_game([E.MAFIA, E.DOCTOR, E.SHERIFF, E.CIVIL, E.CIVIL, E.CIVIL])
+        B.bot_learn(st, {"checks": [("b3", "b1", E.CHECK, True)], "watch": None})
+        random.seed(1)
+        lines = dict(B.bot_lines(st, 0))
+        self.assertIn("комиссар", lines["b3"], "комиссар-бот объявляет найденную мафию")
+        self.assertIn("b3", st["intel"]["claims"])
+        E.start_vote(st)
+        for _ in range(10):
+            self.assertEqual(B.bot_vote_target(st, "b5"), "b1", "мирный бот верит единственному комиссару")
+
+    def test_smart_mafia_hunts_claimed_sheriff(self):
+        st = self.smart_game([E.MAFIA, E.DOCTOR, E.SHERIFF, E.CIVIL, E.CIVIL, E.CIVIL])
+        B.claim(st, "b3")
+        E.start_night(st)
+        targets = [t for u, k, ts in E.night_tasks(st) if u == "b1" and k == E.KILL for t in ts]
+        self.assertEqual(B.bot_target(st, "b1", E.KILL, targets), "b3", "мафия убивает объявившегося комиссара")
+        heals = [t for u, k, ts in E.night_tasks(st) if u == "b2" and k == E.HEAL for t in ts]
+        picks = Counter(B.bot_target(st, "b2", E.HEAL, heals) for _ in range(200))
+        self.assertGreater(picks["b3"], 100, "доктор чаще всего прикрывает комиссара")
+
+    def test_smart_mafia_counter_claims(self):
+        st = self.smart_game([E.MAFIA, E.DOCTOR, E.SHERIFF, E.CIVIL, E.CIVIL, E.CIVIL])
+        B.claim(st, "b3")
+        B.accuse(st, "b3", "b1", 1.0, "claim")
+        for seed in range(30):
+            random.seed(seed)
+            st2 = json.loads(json.dumps(st))
+            lines = dict(B.bot_lines(st2, 0))
+            if "b1" in lines and "комиссар" in lines["b1"].lower():
+                break
+        else:
+            self.fail("мафиози-бот должен хотя бы иногда объявить себя комиссаром в ответ")
+        self.assertIn("b1", st2["intel"]["claims"])
+        self.assertEqual(B.mafia_vote_target(st2), "b3", "семья топит настоящего комиссара")
+
+    def test_smart_bot_answers_human(self):
+        self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
+        self.msg(1, "private", 1, f"/start join_{GROUP}")
+        for _ in range(5):
+            self.press(1, f"addbot:{GROUP}", GROUP)
+        self.press(1, f"begin:{GROUP}", GROUP)
+        g = B.GAMES[GROUP]
+        E.start_night(g)
+        g["players"]["1"]["alive"] = True
+        B.start_day(g)
+        bot = next(u for u in g["players"] if B.is_bot(u) and g["players"][u]["alive"])
+        name = g["players"][bot]["name"].split()[0]
+        n = len(self.tg.to(GROUP))
+        self.msg(GROUP, "supergroup", 1, f"Я комиссар! {name} — мафия, голосуем")
+        self.assertIn("1", g["intel"]["claims"], "бот запомнил заявление человека")
+        self.assertTrue(any(x["a"] == "1" and x["t"] == bot for x in g["intel"]["acc"]))
+        replies = self.tg.to(GROUP)[n:]
+        self.assertTrue(replies and name in replies[0]["text"], "обвинённый бот отвечает в чате")
+
     def test_dead_cannot_vote(self):
         g = self.lobby(5)
         self.press(1, f"begin:{GROUP}", GROUP)

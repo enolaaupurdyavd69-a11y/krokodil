@@ -5,6 +5,8 @@
 
     python -X utf8 simulate.py                 # 12 игроков, случайная партия
     python -X utf8 simulate.py --players 15 --seed 7
+    python -X utf8 simulate.py --players 9 --bots 6      # 3 человека + 6 хитрых ботов
+    python -X utf8 simulate.py --players 9 --bots 8 --games 300   # только статистика побед
 """
 import argparse
 import base64
@@ -17,6 +19,8 @@ from pathlib import Path
 
 import mafia_bot as B
 import mafia_engine as E
+
+END_GAME = B.end_game
 
 NAMES = ["Игорь", "Маша", "Дима", "Оля", "Сергей", "Катя", "Антон", "Лёха", "Вика", "Настя", "Паша", "Света",
          "Рома", "Юля", "Костя"]
@@ -55,8 +59,9 @@ class Recorder:
 
 
 class Sim:
-    def __init__(self, n, seed):
-        self.n, self.rng = n, random.Random(seed)
+    def __init__(self, n, seed, bots=0):
+        self.n, self.rng, self.bots = n, random.Random(seed), bots
+        self.result = None
         self.feed = []          # (чат, текст, png, кнопки, номер фазы)
         self.god = []           # строки «взгляда ведущего»
         self.phase = "Набор"
@@ -118,8 +123,12 @@ class Sim:
         random.seed(self.rng.random())  # тексты бота тоже воспроизводимы
 
         self.group(1, "/mafia")
-        for u in range(1, self.n + 1):
+        for u in range(1, self.n - self.bots + 1):
             self.say(u, f"/start join_{GROUP}")
+        for _ in range(self.bots):
+            self.press(1, f"addbot:{GROUP}", GROUP)
+        end_game = END_GAME
+        B.end_game = lambda g, result: (setattr(self, "result", result), end_game(g, result))
         self.press(1, f"begin:{GROUP}", GROUP)
         g = B.GAMES[GROUP]
         self.god.append("<h3>Роли</h3><ul>" + "".join(
@@ -138,7 +147,8 @@ class Sim:
                 tasks = E.night_tasks(g)
                 by_player = {}
                 for u, kind, targets in tasks:
-                    by_player.setdefault(u, []).append((kind, targets))
+                    if not B.is_bot(u):
+                        by_player.setdefault(u, []).append((kind, targets))
                 for u, items in by_player.items():
                     if self.rng.random() < .08:
                         lines.append(f"{html.escape(g['players'][u]['name'])} проспал(а) ход")
@@ -156,17 +166,30 @@ class Sim:
                             self.press(u, f"n:{GROUP}:{kind}:{t}", u)
                     if GROUP not in B.GAMES or B.GAMES[GROUP]["status"] != "night":
                         break
+                if GROUP in B.GAMES and B.GAMES[GROUP]["status"] == "night":
+                    clock[0] += B.NIGHT_SEC + 1
+                    B.tick()
+                for key, t in g["night"]["acts"].items():
+                    u, kind = key.split(":")
+                    if B.is_bot(u):
+                        lines.append(f"🤖 {html.escape(g['players'][u]['name'])} ({E.ROLE_NAMES[g['players'][u]['role']]}) → "
+                                     f"{KIND_RU[kind]} <b>{html.escape(g['players'][t]['name'])}</b>")
                 self.god.append(f"<h3>Ночь {n0}</h3><ul>" + "".join(f"<li>{x}</li>" for x in lines) + "</ul>")
                 if GROUP in B.GAMES and B.GAMES[GROUP]["status"] == "night":
                     clock[0] += B.NIGHT_SEC + 1
                     B.tick()
             elif g["status"] == "day":
                 self.phase = f"День {g['day_no']}"
-                a = E.alive(g)
+                for _ in range(3):  # полторы минуты обсуждения — боты успевают высказаться и ответить
+                    clock[0] += 30
+                    B.tick()
+                a = [u for u in E.alive(g) if not B.is_bot(u)]
                 for u in self.rng.sample(a, min(3, len(a))):
-                    other = self.rng.choice([t for t in a if t != u])
+                    other = self.rng.choice([t for t in E.alive(g) if t != u])
                     self.group(u, self.rng.choice(CHATTER).format(x=g["players"][other]["name"]))
                 for u in E.voters(g):
+                    if B.is_bot(u):
+                        continue
                     self.press(u, f"tv:{GROUP}", GROUP)
                     if B.GAMES.get(GROUP, {}).get("status") != "day":
                         break
@@ -176,6 +199,8 @@ class Sim:
             elif g["status"] == "vote":
                 lines = []
                 for u in list(E.voters(g)):
+                    if B.is_bot(u):
+                        continue
                     t = self.vote_for(g, u)
                     lines.append(f"{html.escape(g['players'][u]['name'])} → "
                                  + ("пропустить" if t == E.SKIP else f"<b>{html.escape(g['players'][t]['name'])}</b>"))
@@ -185,6 +210,13 @@ class Sim:
                         self.press(u, f"v:{GROUP}:{t}", GROUP)
                     if B.GAMES.get(GROUP, {}).get("status") != "vote":
                         break
+                if B.GAMES.get(GROUP, {}).get("status") == "vote":
+                    clock[0] += B.VOTE_SEC + 1
+                    B.tick()
+                for u, t in g["votes"].items():
+                    if B.is_bot(u):
+                        lines.append(f"🤖 {html.escape(g['players'][u]['name'])} → "
+                                     + ("пропустить" if t == E.SKIP else f"<b>{html.escape(g['players'][t]['name'])}</b>"))
                 silenced = g["memory"].get("silenced")
                 self.god.append(f"<h3>Тайное голосование, день {g['day_no']}</h3><ul>" + "".join(f"<li>{x}</li>" for x in lines)
                                 + (f"<li>💃 {html.escape(g['players'][silenced]['name'])} не голосует</li>" if silenced else "")
@@ -262,11 +294,21 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="номер партии — тот же номер даёт ту же партию")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent / "data" / "simulation.html"))
     ap.add_argument("--no-open", action="store_true", help="не открывать отчёт в браузере")
+    ap.add_argument("--bots", type=int, default=0, help="сколько игроков — боты бота (хотя бы 1 человек)")
+    ap.add_argument("--games", type=int, default=0, help="сыграть столько партий и вывести статистику побед")
     args = ap.parse_args()
+    if args.games:
+        wins = {}
+        for i in range(args.games):
+            r = Sim(args.players, i, args.bots).run().result
+            wins[r] = wins.get(r, 0) + 1
+        print(f"{args.games} партий, игроков {args.players}, ботов {args.bots}: "
+              + ", ".join(f"{k} {v * 100 // args.games}%" for k, v in sorted(wins.items(), key=lambda x: -x[1])))
+        return
     seed = args.seed if args.seed is not None else random.randrange(10_000)
     out = Path(args.out)
     out.parent.mkdir(exist_ok=True)
-    sim = Sim(args.players, seed).run()
+    sim = Sim(args.players, seed, args.bots).run()
     render(sim, out)
     print(f"партия №{seed}, игроков {args.players}: сообщений в группе {sum(m['chat'] == GROUP for m in sim.feed)}, "
           f"картинок {sum(bool(m['img']) for m in sim.feed)} → {out}")
