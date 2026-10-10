@@ -1,2 +1,5 @@
 baklog.md
 project.md
+bot/token.txt
+bot/data/
+__pycache__/
