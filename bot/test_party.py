@@ -142,6 +142,30 @@ class GroupFlow(unittest.TestCase):
         B.tick()
         self.assertNotIn(GROUP, B.GAMES)
 
+    def test_menu_on_add_and_buttons(self):
+        self.n += 1
+        B.handle({"message": {"message_id": self.n, "chat": {"id": int(GROUP), "type": "supergroup", "title": "Мафия"},
+                              "from": {"id": 1, "first_name": "Админ"},
+                              "new_chat_members": [{"id": 999, "is_bot": True, "username": "krokodil_party_18_bot"}]}})
+        menu = self.tg.to(GROUP)[-1]
+        self.assertIn("Во что играем", menu["text"])
+        buttons = [b["callback_data"] for row in menu["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertEqual(buttons, ["gm:mafia", "gm:croc", "gm:tabu", "gm:rules"])
+        pins = [p for m, p in self.tg.sent if m == "pinChatMessage"]
+        self.assertEqual(len(pins), 1)
+        # повторное /games: прошлое меню открепляется, новое закрепляется
+        self.say(2, "/games")
+        self.assertEqual([m for m, _ in self.tg.sent if m in ("unpinChatMessage", "pinChatMessage")][-2:],
+                         ["unpinChatMessage", "pinChatMessage"])
+        self.press(3, "gm:croc")
+        self.assertEqual(B.GAMES[GROUP]["mode"], "croc")
+        self.press(3, "gm:mafia")
+        self.assertIn("уже идёт", self.group_text(), "кнопка не ломает идущую игру")
+        self.say(3, "/stop")  # закончить может тот, кто начал игру кнопкой
+        self.press(4, "gm:mafia")
+        self.assertEqual(B.GAMES[GROUP]["status"], "lobby")
+        self.assertEqual(B.GAMES[GROUP]["creator"], "4", "набор открыл нажавший кнопку")
+
     def test_survives_restart(self):
         self.say(1, "/krokodil")
         self.press(2, f"pl:{GROUP}")

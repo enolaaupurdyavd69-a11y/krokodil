@@ -657,6 +657,46 @@ def party_end(g, headline):
     drop(g)
 
 
+# ---------- меню игр в группе ----------
+
+MENU_TEXT = ("🎲 <b>Во что играем?</b>\n\n"
+             "🎭 <b>Мафия 18+</b> — роли в личку, ночью ходы кнопками, днём голосуем. От 5 человек.\n"
+             "🐊 <b>Крокодил</b> — ведущий объясняет слово текстом, бот сам ловит правильную догадку.\n"
+             "🚫 <b>Табу</b> — то же, но нельзя говорить 5 запретных слов.")
+
+
+def menu_rows():
+    return [[{"text": "🎭 Мафия 18+", "callback_data": "gm:mafia"},
+             {"text": "🐊 Крокодил", "callback_data": "gm:croc"},
+             {"text": "🚫 Табу", "callback_data": "gm:tabu"}],
+            [{"text": "📜 Правила", "callback_data": "gm:rules"}]]
+
+
+def games_menu(chat):
+    """Меню с кнопками игр; если у бота есть право — закрепляет его вместо прошлого меню."""
+    m = send(chat, MENU_TEXT, menu_rows())
+    if not m:
+        return
+    old = kv_get(f"menu:{chat}")
+    if old:
+        safe("unpinChatMessage", chat_id=chat, message_id=int(old))
+    if safe("pinChatMessage", chat_id=chat, message_id=m["message_id"], disable_notification=True):
+        kv_set(f"menu:{chat}", m["message_id"])
+
+
+def menu_callback(cq, game):
+    chat = cq["message"]["chat"]
+    cid, title, user = str(chat["id"]), chat.get("title") or "Игра", cq["from"]
+    answer(cq)
+    if game == "mafia":
+        open_lobby(cid, title, user)
+    elif game in ("croc", "tabu"):
+        party_open(cid, title, user, game)
+    elif game == "rules":
+        send(cid, T.RULES + "\n\nКрокодил и Табу: ведущий жмёт «Посмотреть слово» и объясняет текстом, "
+                            "остальные пишут догадки в чат — бот сам засчитывает правильную.")
+
+
 # ---------- таймеры ----------
 
 def tick():
@@ -692,7 +732,8 @@ def next_wait():
 
 GREETING = ("👋 Я веду игры в группах, где у каждого свой телефон: <b>Мафия 18+</b> (/mafia), "
             "<b>Крокодил</b> (/krokodil) и <b>Табу</b> (/tabu) — в них я сам засчитываю догадки из чата.\n\n"
-            "Добавьте меня в группу и напишите там нужную команду. Правила Мафии — /rules.\n\n"
+            "Добавьте меня в группу — я пришлю меню с кнопками игр (или /games). "
+            "Дайте мне право закреплять сообщения — закреплю меню вверху чата. Правила Мафии — /rules.\n\n"
             "Играть всем на одном телефоне — кнопка «Играть» внизу.")
 
 
@@ -714,6 +755,9 @@ def on_message(m):
             relay_mafia(uid, text)
         return
     cid = str(chat["id"])
+    if any((u.get("username") or "").lower() == BOT.lower() for u in m.get("new_chat_members", [])):
+        games_menu(cid)  # бота только что добавили в группу
+        return
     if not text.startswith("/"):
         g = GAMES.get(cid)
         if g and is_party(g):
@@ -728,7 +772,9 @@ def on_message(m):
         return  # команда другому боту
     cmd = cmd.lower()
     title = chat.get("title") or "Игра"
-    if cmd == "/mafia":
+    if cmd in ("/games", "/menu"):
+        games_menu(cid)
+    elif cmd == "/mafia":
         open_lobby(cid, title, user)
     elif cmd in ("/krokodil", "/croc"):
         party_open(cid, title, user, "croc")
@@ -772,6 +818,8 @@ def on_callback(cq):
             on_vote(cq, parts[1], parts[2])
         elif kind in ("pl", "pw", "pn", "pp"):
             party_callback(cq, kind, parts[1])
+        elif kind == "gm":
+            menu_callback(cq, parts[1])
         else:
             answer(cq)
     except IndexError:
@@ -844,6 +892,7 @@ def main():
             time.sleep(15)
     log(f"старт @{BOT}, партий в базе: {len(GAMES)}")
     safe("setMyCommands", scope={"type": "all_group_chats"}, commands=[
+        {"command": "games", "description": "Меню игр с кнопками"},
         {"command": "mafia", "description": "Мафия 18+: открыть набор"},
         {"command": "krokodil", "description": "Крокодил: объясняй текстом, бот ловит догадки"},
         {"command": "tabu", "description": "Табу: объясняй без 5 запретных слов"},
