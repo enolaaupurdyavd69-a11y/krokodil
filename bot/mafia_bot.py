@@ -32,7 +32,7 @@ except ImportError:
 
 APP_URL = "https://enolaaupurdyavd69-a11y.github.io/krokodil/"
 MAFIA_URL = APP_URL + "mafia.html"
-APP_VER = "4"  # меняется вместе с mafia.html — сбрасывает кеш Telegram
+APP_VER = "5"  # меняется вместе с mafia.html — сбрасывает кеш Telegram
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -188,8 +188,11 @@ def edit(chat, msg_id, text, rows=None):
              disable_web_page_preview=True, reply_markup=kb(rows or []))
 
 
-def answer(cq, text="", alert=False):
-    safe("answerCallbackQuery", callback_query_id=cq["id"], text=text, show_alert=alert)
+def answer(cq, text="", alert=False, url=None):
+    p = {"callback_query_id": cq["id"], "text": text, "show_alert": alert}
+    if url:
+        p["url"] = url  # t.me/бот?start=… — Telegram сам откроет личку бота
+    safe("answerCallbackQuery", **p)
 
 
 ALL_PERMS = ["can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos", "can_send_videos",
@@ -294,12 +297,38 @@ BOT_NAMES = ["Валера", "Жанна", "Аркадий", "Снежана", "
 def lobby_text(g):
     names = "\n".join(f"{i}. {'🤖 ' if is_bot(u) else ''}{html.escape(n)}"
                       for i, (u, n) in enumerate(g["joined"].items(), 1)) or "пока никого"
-    bots = sum(is_bot(u) for u in g["joined"])
-    return (f"🎭 <b>Мафия 18+ — набор игроков</b>\n\n{names}\n\n"
-            f"Игроков: {len(g['joined'])}{f' (из них ботов: {bots})' if bots else ''} "
-            f"— нужно {E.MIN_PLAYERS}–{E.MAX_PLAYERS}. Не хватает людей — добавьте ботов.\n"
-            "Нажмите «Участвую» — откроется личка бота, там нажмите «Старт». "
-            "Когда все собрались, любой участник нажимает «▶️ Начать игру».")
+    n = len(g["joined"])
+    lack = max(0, E.MIN_PLAYERS - n)
+    status = (f"Не хватает {lack} — при старте добавим ботов 🤖" if lack else "Можно начинать ✅")
+    return (f"🎭 <b>Мафия 18+ — собираем игроков</b>\n\n"
+            f"<b>Игроки ({n}):</b>\n{names}\n{status}\n\n"
+            "<b>Как начать:</b>\n"
+            "1️⃣ Каждый, кто играет, жмёт «🙋 Я играю».\n"
+            "2️⃣ Все записались — жмите «▶️ Начать».\n\n"
+            "Свою роль и ходы каждый увидит в личке бота — кнопка «🎭 Игра». Обсуждение — здесь, в группе.")
+
+
+def group_link(g):
+    """Ссылка «вернуться в группу» (на сообщение набора); для старых маленьких групп ссылки нет."""
+    chat = str(g["chat"])
+    return f"https://t.me/c/{chat[4:]}/{g.get('msg') or 1}" if chat.startswith("-100") else None
+
+
+def back_rows(g):
+    link = group_link(g)
+    return [[{"text": "↩️ Вернуться в группу", "url": link}]] if link else None
+
+
+def lobby_rows(g):
+    chat = g["chat"]
+    lack = max(0, E.MIN_PLAYERS - len(g["joined"]))
+    start = f"▶️ Начать (+{lack} 🤖)" if lack and g["joined"] else "▶️ Начать"
+    return [[{"text": "🙋 Я играю", "callback_data": f"join:{chat}"},
+             {"text": "🚪 Не играю", "callback_data": f"leave:{chat}"}],
+            [{"text": "🤖 + бот", "callback_data": f"addbot:{chat}"},
+             {"text": "🤖 − бот", "callback_data": f"delbot:{chat}"}],
+            [{"text": start, "callback_data": f"begin:{chat}"}],
+            [{"text": "✖️ Отменить набор", "callback_data": f"cancel:{chat}"}]]
 
 
 def can_manage(g, chat, uid):
@@ -307,12 +336,13 @@ def can_manage(g, chat, uid):
     return uid == g["creator"] or uid in g["joined"] or is_admin(chat, uid)
 
 
-def lobby_rows(chat):
-    return [[{"text": "🙋 Участвую", "url": f"https://t.me/{BOT}?start=join_{chat}"}],
-            [{"text": "🤖 + бот", "callback_data": f"addbot:{chat}"},
-             {"text": "🤖 − бот", "callback_data": f"delbot:{chat}"}],
-            [{"text": "▶️ Начать игру", "callback_data": f"begin:{chat}"},
-             {"text": "Выйти", "callback_data": f"leave:{chat}"}]]
+def add_bot(g):
+    bots = [u for u in g["joined"] if is_bot(u)]
+    used = set(g["joined"].values())
+    name = next((f"{n} (бот)" for n in BOT_NAMES if f"{n} (бот)" not in used), f"Бот {len(bots) + 1}")
+    bid = next(f"b{i}" for i in range(1, 100) if f"b{i}" not in g["joined"])
+    g["joined"][bid] = name
+    return name
 
 
 def bot_lobby(cq, chat, add):
@@ -323,18 +353,14 @@ def bot_lobby(cq, chat, add):
         answer(cq, "Набор уже закрыт")
         return
     if not can_manage(g, chat, uid):
-        answer(cq, "Сначала нажмите «Участвую» — ботов добавляют участники игры", alert=True)
+        answer(cq, "Сначала нажмите «🙋 Я играю» — ботов добавляют участники игры", alert=True)
         return
     bots = [u for u in g["joined"] if is_bot(u)]
     if add:
         if len(g["joined"]) >= E.MAX_PLAYERS:
             answer(cq, f"Уже {E.MAX_PLAYERS} игроков — больше нельзя", alert=True)
             return
-        used = set(g["joined"].values())
-        name = next((f"{n} (бот)" for n in BOT_NAMES if f"{n} (бот)" not in used), f"Бот {len(bots) + 1}")
-        bid = next(f"b{i}" for i in range(1, 100) if f"b{i}" not in g["joined"])
-        g["joined"][bid] = name
-        answer(cq, f"Добавлен {name}")
+        answer(cq, f"Добавлен {add_bot(g)}")
     else:
         if not bots:
             answer(cq, "Ботов в списке нет")
@@ -342,7 +368,7 @@ def bot_lobby(cq, chat, add):
         del g["joined"][bots[-1]]
         answer(cq, "Бот убран")
     save(g)
-    edit(chat, g["msg"], lobby_text(g), lobby_rows(chat))
+    edit(chat, g["msg"], lobby_text(g), lobby_rows(g))
 
 
 def open_lobby(chat, title, user):
@@ -350,7 +376,7 @@ def open_lobby(chat, title, user):
     if g and g["status"] == "lobby" and not is_party(g):
         # набор уже открыт — присылаем его заново вниз чата, старое сообщение убираем
         safe("deleteMessage", chat_id=chat, message_id=g["msg"])
-        m = send(chat, lobby_text(g), lobby_rows(chat))
+        m = send(chat, lobby_text(g), lobby_rows(g))
         g["msg"] = m and m["message_id"]
         g["deadline"] = max(g["deadline"], now() + LOBBY_SEC)
         save(g)
@@ -360,10 +386,50 @@ def open_lobby(chat, title, user):
         return
     g = {"chat": chat, "title": title, "creator": str(user["id"]), "status": "lobby", "joined": {},
          "deadline": now() + LOBBY_SEC, "night_no": 0, "day_no": 0}
-    m = send(chat, lobby_text(g), lobby_rows(chat))
+    m = send(chat, lobby_text(g), lobby_rows(g))
     g["msg"] = m and m["message_id"]
     GAMES[chat] = g
     save(g)
+
+
+def join_cb(cq, chat):
+    """«🙋 Я играю» в группе. Если человек уже запускал бота — записываем, не уводя из группы."""
+    uid, g = str(cq["from"]["id"]), GAMES.get(chat)
+    if not g or g.get("kind") == "party" or g["status"] != "lobby":
+        answer(cq, "Набор уже закрыт")
+        return
+    if uid in g["joined"]:
+        answer(cq, "Вы уже в игре ✅ Ждите начала")
+        return
+    if len(g["joined"]) >= E.MAX_PLAYERS:
+        answer(cq, f"Мест нет: уже {E.MAX_PLAYERS} игроков", alert=True)
+        return
+    other = game_of_user(uid)
+    if other and other is not g:
+        answer(cq, "Вы уже участвуете в другой партии", alert=True)
+        return
+    if send(uid, f"✅ Вы записаны в Мафию «{html.escape(g['title'])}». Когда игра начнётся, "
+                 "здесь появятся ваша роль и кнопка «🎭 Игра».", back_rows(g)) is None:
+        # бот не может написать первым — открываем его личку, там «Старт» допишет в игру
+        answer(cq, url=f"https://t.me/{BOT}?start=join_{chat}")
+        return
+    g["joined"][uid] = user_name(cq["from"])
+    save(g)
+    answer(cq, "✅ Вы в игре! Ждите начала")
+    edit(chat, g["msg"], lobby_text(g), lobby_rows(g))
+
+
+def cancel_lobby(cq, chat):
+    uid, g = str(cq["from"]["id"]), GAMES.get(chat)
+    if not g or g.get("kind") == "party" or g["status"] != "lobby":
+        answer(cq, "Набор уже закрыт")
+        return
+    if uid != g["creator"] and not is_admin(chat, uid):
+        answer(cq, "Отменить может тот, кто открыл набор, или админ", alert=True)
+        return
+    answer(cq, "Набор отменён")
+    edit(chat, g["msg"], "🎭 Набор в Мафию отменён. Новый — /mafia или кнопка «Мафия» в меню.")
+    drop(g)
 
 
 def join(chat, user):
@@ -384,9 +450,10 @@ def join(chat, user):
         return
     g["joined"][uid] = user_name(user)
     save(g)
-    send(uid, f"✅ Вы в игре «{html.escape(g['title'])}». Роль придёт сюда, когда начнётся партия. "
-              "Не удаляйте и не блокируйте этот чат.")
-    edit(chat, g["msg"], lobby_text(g), lobby_rows(chat))
+    send(uid, f"✅ Готово, вы в игре «{html.escape(g['title'])}»!\n\n"
+              "Это личка с ботом — сюда придут ваша роль и кнопка «🎭 Игра». "
+              "А пока вернитесь в группу 👇", back_rows(g))
+    edit(chat, g["msg"], lobby_text(g), lobby_rows(g))
 
 
 def leave(cq, chat):
@@ -398,7 +465,7 @@ def leave(cq, chat):
     del g["joined"][uid]
     save(g)
     answer(cq, "Вы вышли из списка")
-    edit(chat, g["msg"], lobby_text(g), lobby_rows(chat))
+    edit(chat, g["msg"], lobby_text(g), lobby_rows(g))
 
 
 def begin(cq, chat):
@@ -408,22 +475,23 @@ def begin(cq, chat):
         answer(cq, "Набор уже закрыт")
         return
     if not can_manage(g, chat, uid):
-        answer(cq, "Сначала нажмите «Участвую» — начать может участник игры", alert=True)
-        return
-    n = len(g["joined"])
-    if n < E.MIN_PLAYERS:
-        answer(cq, f"Нужно минимум {E.MIN_PLAYERS} игроков, сейчас {n}. Не хватает людей — добавьте ботов", alert=True)
+        answer(cq, "Сначала нажмите «🙋 Я играю» — начать может участник игры", alert=True)
         return
     if all(is_bot(u) for u in g["joined"]):
-        answer(cq, "Нужен хотя бы один живой игрок — нажмите «Участвую»", alert=True)
+        answer(cq, "Нужен хотя бы один живой игрок — нажмите «🙋 Я играю»", alert=True)
         return
+    while len(g["joined"]) < E.MIN_PLAYERS:  # людей мало — добираем ботами
+        add_bot(g)
+    n = len(g["joined"])
     answer(cq, "Поехали!")
     g.update(E.new_game(g["joined"]))
     roles = Counter(p["role"] for p in g["players"].values())
     lineup = ", ".join(f"{E.ROLE_NAMES[r]}{f' ×{c}' if c > 1 else ''}" for r, c in roles.items())
     edit(chat, g["msg"], f"🎭 <b>Мафия 18+ — игра началась!</b>\n\nИгроков: {n}.\nВ городе: {lineup}.\n"
-                         "Роли пришли в личку бота. Играем в приложении: личка бота → кнопка «🎭 Игра». Мёртвые молчат.",
-         [[{"text": "🎭 Открыть игру", "url": f"https://t.me/{BOT}"}]])
+                         "Роли пришли в личку бота. Ходы и голосование — там, кнопка «🎭 Игра» внизу. "
+                         "Обсуждаем здесь. Мёртвые молчат.",
+         [[{"text": "🎭 Открыть мою игру", "url": f"https://t.me/{BOT}"}],
+          [{"text": "⛔ Остановить игру", "callback_data": f"stopg:{chat}"}]])
     failed = []
     for u, p in g["players"].items():
         text = (f"Ваша роль в игре «{html.escape(g['title'])}»:\n\n{T.ROLE_INFO[p['role']]}\n\n"
@@ -442,6 +510,9 @@ def begin(cq, chat):
             g["title"], [g["players"][v]["name"] for v in mates])
         if send_photo(u, card, text, markup=role_keyboard(g, u)) is None:
             failed.append(h(g, u))
+        elif not is_bot(u):
+            send(u, "👇 Ваша игра — кнопка <b>«🎭 Игра»</b> внизу этого чата (рядом с полем ввода). "
+                    "Нажимайте её, когда бот пишет о новой фазе.\nОбсуждение — в группе.", back_rows(g))
     if failed:
         send(chat, "⚠️ Не смог написать: " + ", ".join(failed) + ". Откройте личку бота и нажмите «Старт».")
     start_night(g)
@@ -463,7 +534,7 @@ def app_data(g, uid):
     """Снимок партии глазами игрока: фаза, табло (роли погибших открыты), события, его ход и заметки."""
     p = g["players"][uid]
     st = "end" if g.get("result") else g["status"]
-    data = {"c": g["chat"], "g": g["title"][:40], "me": uid, "r": p["role"], "st": st,
+    data = {"c": g["chat"], "g": g["title"][:40], "me": uid, "r": p["role"], "st": st, "gl": group_link(g),
             "n": g.get("night_no", 0), "d": g.get("day_no", 0),
             "m": [g["players"][v]["name"][:20] for v in mafia_alive(g) if v != uid] if E.is_mafia(g, uid) else [],
             "p": {u: [q["name"][:20], int(q["alive"])] + ([q["role"]] if not q["alive"] or st == "end" else [])
@@ -585,13 +656,47 @@ def on_night_action(cq, chat, kind, target):
         night_progress(g)
 
 
+def quit_game(g, uid):
+    """Игрок уходит посреди партии: выбывает, роль раскрывается, игра идёт дальше без него."""
+    if not g or g["status"] == "lobby" or uid not in g["players"] or not g["players"][uid]["alive"]:
+        send(uid, "Вы уже не в игре.")
+        return
+    g["players"][uid]["alive"] = False
+    set_muted(g, uid, True)
+    send(g["chat"], f"🚪 <b>{h(g, uid)}</b> вышел(ла) из игры. Роль: {role_name(g, uid)}.")
+    if g["status"] == "vote":  # голоса за ушедшего и его собственный не считаются
+        g["votes"] = {v: t for v, t in g["votes"].items() if v != uid and t != uid}
+    save(g)
+    send(uid, "🚪 Вы вышли из игры. Досмотреть партию можно в «🎭 Игра».", markup=role_keyboard(g, uid))
+    if check_win(g):
+        return
+    if g["status"] == "night":
+        night_progress(g)
+    elif g["status"] == "vote" and E.vote_done(g):
+        finish_vote(g)
+
+
+def stop_cb(cq, chat):
+    uid, g = str(cq["from"]["id"]), GAMES.get(chat)
+    if not g or is_party(g):
+        answer(cq, "Игра уже закончилась")
+        return
+    if uid != g["creator"] and not is_admin(chat, uid):
+        answer(cq, "Остановить может тот, кто начал игру, или админ группы", alert=True)
+        return
+    answer(cq, "Игра остановлена")
+    stop(chat, cq["from"])
+
+
 def on_webapp(uid, raw):
-    """Ход из мини-приложения «Моя роль»: Telegram присылает его боту как сообщение web_app_data."""
+    """Ход из мини-приложения «🎭 Игра»: Telegram присылает его боту как сообщение web_app_data."""
     try:
         data = json.loads(raw)
         g = GAMES.get(str(data["c"]))
         if data.get("a") == "v":
             return webapp_vote(g, uid, data)
+        if data.get("a") == "q":
+            return quit_game(g, uid)
         acts = dict(data["acts"])
     except (ValueError, KeyError, TypeError):
         send(uid, "Не понял ход из приложения. Выберите кнопками в чате.")
@@ -1621,6 +1726,12 @@ def on_callback(cq):
         kind = parts[0]
         if kind == "begin":
             begin(cq, parts[1])
+        elif kind == "join":
+            join_cb(cq, parts[1])
+        elif kind == "cancel":
+            cancel_lobby(cq, parts[1])
+        elif kind == "stopg":
+            stop_cb(cq, parts[1])
         elif kind in ("addbot", "delbot"):
             bot_lobby(cq, parts[1], kind == "addbot")
         elif kind == "leave":

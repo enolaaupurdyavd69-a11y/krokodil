@@ -98,6 +98,11 @@
     .town .dead b { color: var(--muted); }
     .town small { font-size: 11px; }
     .hint { font-size: 12px; color: var(--muted); text-align: center; }
+    .bar-top { display: flex; gap: 8px; }
+    .chip { flex: 1; border: 1px solid var(--line); background: var(--screen); color: var(--fg); border-radius: 12px; padding: 10px 8px;
+            font: 600 13px var(--body); cursor: pointer; text-align: center; }
+    .chip.quit { color: var(--bad); }
+    .chip:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
   </style>
 </head>
 <body>
@@ -311,19 +316,41 @@
       ${main()}
       ${roleBlock()}
       ${townBlock()}
-      ${st === 'end' ? '' : '<p class="hint">Новая фаза — бот пришлёт сообщение. Нажмите «🎭 Игра» внизу чата, чтобы увидеть, что случилось.</p>'}`;
+      ${st === 'end' ? '' : '<p class="hint">Новая фаза — бот пришлёт сообщение. Нажмите «🎭 Игра» внизу чата, чтобы увидеть, что случилось.</p>'}
+      <div class="bar-top">
+        ${data.gl ? '<button class="chip" id="toGroup">↩️ В группу</button>' : ''}
+        ${meAlive && st !== 'end' && st !== 'lobby' ? '<button class="chip quit" id="quit">🚪 Выйти из игры</button>' : ''}
+      </div>
+      <p class="err" id="err2"></p>`;
   }
 
-  function send(payload, fallback) {
+  function send(payload, fallback, errId = 'err') {
     try {
       if (!tg || typeof tg.sendData !== 'function' || tg.platform === 'unknown') throw new Error('не в Telegram');
       tg.sendData(JSON.stringify(payload));  // Telegram передаст ход боту и закроет окно
     } catch {
-      document.getElementById('err').textContent = fallback;
+      const el = document.getElementById(errId);
+      if (el) el.textContent = fallback;
     }
   }
 
+  function toGroup() {
+    try {
+      if (tg && tg.openTelegramLink) { tg.openTelegramLink(data.gl); tg.close(); return; }
+    } catch { /* старый клиент */ }
+    location.href = data.gl;
+  }
+
+  function quit() {
+    const go = ok => ok && send({ a: 'q', c: data.c }, 'Не удалось выйти отсюда. Напишите в группе /stop или попросите админа.', 'err2');
+    const ask = 'Выйти из игры? Вы выбываете, ваша роль откроется всем.';
+    try { if (tg && tg.showConfirm && tg.platform !== 'unknown') return tg.showConfirm(ask, go); } catch { /* */ }
+    go(window.confirm(ask));
+  }
+
   app.addEventListener('click', e => {
+    if (e.target.id === 'toGroup') return toGroup();
+    if (e.target.id === 'quit') return quit();
     const vb = e.target.closest('[data-vote]');
     if (vb) {
       vote = vb.dataset.vote;

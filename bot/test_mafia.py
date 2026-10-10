@@ -279,20 +279,44 @@ class BotFlow(unittest.TestCase):
     def test_lobby_and_permissions(self):
         g = self.lobby(4)
         self.assertEqual(len(g["joined"]), 4)
-        self.press(1, f"begin:{GROUP}", GROUP)
-        self.assertIn("минимум 5", self.answers()[-1])
-        self.msg(5, "private", 5, f"/start join_{GROUP}")
         self.press(9, f"begin:{GROUP}", GROUP)
-        self.assertIn("Участвую", self.answers()[-1], "чужой не может начать")
+        self.assertIn("Я играю", self.answers()[-1], "чужой не может начать")
         n = len(self.tg.to(GROUP))
         self.msg(GROUP, "supergroup", 2, "/mafia")
-        self.assertIn("набор игроков", self.tg.to(GROUP)[n]["text"], "повторный /mafia присылает набор заново")
-        self.press(3, f"begin:{GROUP}", GROUP)  # любой участник может начать
+        self.assertIn("собираем игроков", self.tg.to(GROUP)[n]["text"], "повторный /mafia присылает набор заново")
+        self.press(3, f"begin:{GROUP}", GROUP)  # любой участник может начать; людей 4 — добавится 1 бот
         self.assertEqual(g["status"], "night")
-        for u in range(1, 6):
+        self.assertEqual(len(g["players"]), 5)
+        self.assertEqual(sum(B.is_bot(u) for u in g["players"]), 1, "недостающих добрали ботами")
+        for u in range(1, 5):
             self.assertTrue(any("Ваша роль" in p["text"] for p in self.tg.to(u)), f"игрок {u} без роли")
         self.msg(GROUP, "supergroup", 2, "/mafia")
         self.assertIn("уже идёт", self.tg.to(GROUP)[-1]["text"])
+
+    def test_join_in_one_tap_and_quit(self):
+        self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
+        for u in (1, 2):
+            self.press(u, f"join:{GROUP}", GROUP)    # бот может писать — запись без ухода из группы
+        g = B.GAMES[GROUP]
+        self.assertEqual(set(g["joined"]), {"1", "2"})
+        self.assertIn("Вы в игре", self.answers()[-1])
+        self.assertTrue(any("Вернуться в группу" in str(p.get("reply_markup")) for p in self.tg.to(2)))
+        # бот не может написать человеку — Telegram откроет личку бота по ссылке
+        real = self.tg.__call__
+        B.api = lambda m, files=None, **p: None if m == "sendMessage" and str(p.get("chat_id")) == "3" else real(m, files, **p)
+        self.press(3, f"join:{GROUP}", GROUP)
+        B.api = B.api_upload = self.tg
+        last = [p for m, p in self.tg.sent if m == "answerCallbackQuery"][-1]
+        self.assertIn(f"start=join_{GROUP}", last.get("url", ""))
+        self.assertNotIn("3", g["joined"])
+        self.press(1, f"begin:{GROUP}", GROUP)
+        self.assertEqual(len(g["players"]), 5)
+        quitter = "2"
+        B.handle({"message": {"chat": {"id": 2, "type": "private"}, "from": {"id": 2},
+                              "web_app_data": {"data": json.dumps({"a": "q", "c": GROUP})}}})
+        if GROUP in B.GAMES:
+            self.assertFalse(g["players"][quitter]["alive"])
+        self.assertTrue(any("вышел(ла) из игры" in p["text"] for p in self.tg.to(GROUP)))
 
     def test_mafia_chat_relay(self):
         g = self.lobby(7)
@@ -446,7 +470,7 @@ class BotFlow(unittest.TestCase):
         self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
         self.msg(1, "private", 1, f"/start join_{GROUP}")
         self.press(2, f"addbot:{GROUP}", GROUP)
-        self.assertIn("Участвую", self.answers()[-1], "чужой не добавляет ботов")
+        self.assertIn("Я играю", self.answers()[-1], "чужой не добавляет ботов")
         for _ in range(7):
             self.press(1, f"addbot:{GROUP}", GROUP)
         self.press(1, f"delbot:{GROUP}", GROUP)
