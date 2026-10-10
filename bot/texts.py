@@ -94,5 +94,8 @@ RULES = (
 )
 
 
+DEV = "\n\n<i>Разработчик: Ромашко Игорь Николаевич</i>"  # подпись в приветствии, правилах и меню игр
+
+
 def pick(lines, **kw):
     return random.choice(lines).format(**kw)
