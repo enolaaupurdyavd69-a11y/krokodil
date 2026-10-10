@@ -299,7 +299,12 @@ def lobby_text(g):
             f"Игроков: {len(g['joined'])}{f' (из них ботов: {bots})' if bots else ''} "
             f"— нужно {E.MIN_PLAYERS}–{E.MAX_PLAYERS}. Не хватает людей — добавьте ботов.\n"
             "Нажмите «Участвую» — откроется личка бота, там нажмите «Старт». "
-            "Когда все собрались, открывший набор нажимает «Начать игру».")
+            "Когда все собрались, любой участник нажимает «▶️ Начать игру».")
+
+
+def can_manage(g, chat, uid):
+    """Ботов добавляет и игру начинает любой записавшийся, открывший набор или админ группы."""
+    return uid == g["creator"] or uid in g["joined"] or is_admin(chat, uid)
 
 
 def lobby_rows(chat):
@@ -317,8 +322,8 @@ def bot_lobby(cq, chat, add):
     if not g or g.get("kind") == "party" or g["status"] != "lobby":
         answer(cq, "Набор уже закрыт")
         return
-    if uid != g["creator"] and not is_admin(chat, uid):
-        answer(cq, "Ботов добавляет тот, кто открыл набор, или админ группы", alert=True)
+    if not can_manage(g, chat, uid):
+        answer(cq, "Сначала нажмите «Участвую» — ботов добавляют участники игры", alert=True)
         return
     bots = [u for u in g["joined"] if is_bot(u)]
     if add:
@@ -341,8 +346,17 @@ def bot_lobby(cq, chat, add):
 
 
 def open_lobby(chat, title, user):
-    if chat in GAMES:
-        send(chat, "Здесь уже идёт партия или открыт набор. /stop — прервать.")
+    g = GAMES.get(chat)
+    if g and g["status"] == "lobby" and not is_party(g):
+        # набор уже открыт — присылаем его заново вниз чата, старое сообщение убираем
+        safe("deleteMessage", chat_id=chat, message_id=g["msg"])
+        m = send(chat, lobby_text(g), lobby_rows(chat))
+        g["msg"] = m and m["message_id"]
+        g["deadline"] = max(g["deadline"], now() + LOBBY_SEC)
+        save(g)
+        return
+    if g:
+        send(chat, "Здесь уже идёт партия. /stop — прервать.")
         return
     g = {"chat": chat, "title": title, "creator": str(user["id"]), "status": "lobby", "joined": {},
          "deadline": now() + LOBBY_SEC, "night_no": 0, "day_no": 0}
@@ -393,8 +407,8 @@ def begin(cq, chat):
     if not g or g["status"] != "lobby":
         answer(cq, "Набор уже закрыт")
         return
-    if uid != g["creator"] and not is_admin(chat, uid):
-        answer(cq, "Начать может тот, кто открыл набор, или админ группы", alert=True)
+    if not can_manage(g, chat, uid):
+        answer(cq, "Сначала нажмите «Участвую» — начать может участник игры", alert=True)
         return
     n = len(g["joined"])
     if n < E.MIN_PLAYERS:

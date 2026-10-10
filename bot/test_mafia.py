@@ -282,9 +282,12 @@ class BotFlow(unittest.TestCase):
         self.press(1, f"begin:{GROUP}", GROUP)
         self.assertIn("минимум 5", self.answers()[-1])
         self.msg(5, "private", 5, f"/start join_{GROUP}")
-        self.press(3, f"begin:{GROUP}", GROUP)
-        self.assertIn("открыл набор", self.answers()[-1], "чужой не может начать")
-        self.press(1, f"begin:{GROUP}", GROUP)
+        self.press(9, f"begin:{GROUP}", GROUP)
+        self.assertIn("Участвую", self.answers()[-1], "чужой не может начать")
+        n = len(self.tg.to(GROUP))
+        self.msg(GROUP, "supergroup", 2, "/mafia")
+        self.assertIn("набор игроков", self.tg.to(GROUP)[n]["text"], "повторный /mafia присылает набор заново")
+        self.press(3, f"begin:{GROUP}", GROUP)  # любой участник может начать
         self.assertEqual(g["status"], "night")
         for u in range(1, 6):
             self.assertTrue(any("Ваша роль" in p["text"] for p in self.tg.to(u)), f"игрок {u} без роли")
@@ -443,7 +446,7 @@ class BotFlow(unittest.TestCase):
         self.msg(GROUP, "supergroup", 1, "/mafia", "Пятница")
         self.msg(1, "private", 1, f"/start join_{GROUP}")
         self.press(2, f"addbot:{GROUP}", GROUP)
-        self.assertIn("открыл набор", self.answers()[-1], "чужой не добавляет ботов")
+        self.assertIn("Участвую", self.answers()[-1], "чужой не добавляет ботов")
         for _ in range(7):
             self.press(1, f"addbot:{GROUP}", GROUP)
         self.press(1, f"delbot:{GROUP}", GROUP)
