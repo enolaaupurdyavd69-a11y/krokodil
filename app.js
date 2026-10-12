@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   // При изменении слов или кода — увеличить, чтобы Telegram не отдавал старое из кеша
-  const VER = '4';
+  const VER = '5';
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45'];
   const NAMES = ['Огненные лисы', 'Трезвые не будем', 'Третьи лишние', 'Ночные совы', 'Без тормозов', 'Шестое чувство'];
   const TIMES = [30, 60, 90, 120];
@@ -68,12 +68,23 @@
     }
     return out;
   }
+  // Сыгранные слова помним и между партиями (на этом телефоне): новые партии берут сначала несыгранные
+  const playedKey = mode => 'played_' + mode;
+  function played(mode) { try { return JSON.parse(localStorage.getItem(playedKey(mode))) || []; } catch { return []; } }
+  function remember(mode, k) {
+    try { localStorage.setItem(playedKey(mode), JSON.stringify(played(mode).concat(k).slice(-3000))); } catch { /* без памяти — только в партии */ }
+  }
   function nextWord() {
-    let p = pool(game.mode, game.cats, game.diff, game.used);
+    let p = pool(game.mode, game.cats, game.diff, game.used.concat(played(game.mode)));
+    if (!p.length) {  // всё сыграно — начинаем колоду заново, в этой партии слова по-прежнему не повторяются
+      try { localStorage.removeItem(playedKey(game.mode)); } catch { /* */ }
+      p = pool(game.mode, game.cats, game.diff, game.used);
+    }
     if (!p.length) { game.used = []; p = pool(game.mode, game.cats, game.diff, null); }
     if (!p.length) { game.word = null; return; }
     const w = p[Math.floor(Math.random() * p.length)];
     game.used.push(w.k);
+    remember(game.mode, w.k);
     game.word = { t: w.t, c: w.c, x: w.x || null };
     game.shownAt = Date.now();
   }
