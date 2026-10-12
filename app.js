@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   // При изменении слов или кода — увеличить, чтобы Telegram не отдавал старое из кеша
-  const VER = '5';
+  const VER = '6';
   const COLORS = ['#ff4fa3', '#ffb547', '#2aabee', '#3ddc97', '#b388ff', '#ff7a45'];
   const NAMES = ['Огненные лисы', 'Трезвые не будем', 'Третьи лишние', 'Ночные совы', 'Без тормозов', 'Шестое чувство'];
   const TIMES = [30, 60, 90, 120];
@@ -191,7 +191,8 @@
   function timeUp() {
     stop(); keepAwake(false);
     beep(330, .6); haptic('warning');
-    go(game.lastWord && game.word ? 'last' : 'review');
+    game.lastTeam = null;
+    go('review');  // последнее слово отмечается прямо в итоге хода; не отметили — не угадано
   }
   // r: 'hit' — угадано, 'skip' — пропуск, 'foul' — нарушение в Табу
   function mark(r) {
@@ -233,7 +234,7 @@
       }
       game.round++;
     }
-    go('score');
+    go('ready');  // счёт виден в итоге хода и на экране передачи телефона
   }
 
   function closingGuard(on) {
@@ -347,6 +348,8 @@
         <div class="big-team" style="color:${t.color}">${esc(t.name)}</div>
         <p class="muted">${how}</p>
         <p class="muted small">${game.time} секунд${game.penalty ? ' · пропуск −1' : ''}${game.mode === 'tabu' ? ' · нарушение −1' : ''}</p>
+        ${game.turns ? `<p class="small">Счёт: ${game.teams.map(x => `<span style="color:${x.color}">${esc(x.name)} ${x.score}</span>`).join(' · ')} · играем до ${game.target}</p>` : ''}
+        ${game.turns && game.turn === 0 && Math.max(...game.teams.map(x => x.score)) >= game.target ? '<p class="card small">Ничья на первом месте — играем ещё круг.</p>' : ''}
       </div>
       <div class="stack spacer">
         <button class="btn" data-act="go">Я готов, поехали</button>
@@ -386,31 +389,30 @@
       </div></div>` : ''}`;
     },
 
-    last: () => `
-      <div class="hero center" style="margin-top:8vh">
-        <div class="eyebrow">Время вышло · последнее слово</div>
-        <div class="big-team">${esc(game.word.t)}</div>
-        <p class="muted">Кто угадал? Очко получит эта команда.</p>
-      </div>
-      <div class="stack spacer">
-        ${game.teams.map((t, i) => `<button class="btn alt" data-act="lastBy" data-i="${i}"><span class="dot" style="background:${t.color};margin-right:8px"></span>${esc(t.name)}</button>`).join('')}
-        <button class="btn" data-act="lastBy" data-i="-1">Никто не угадал</button>
-      </div>`,
+    last: () => views.review(),  // старые сохранения: последнее слово теперь в итоге хода
 
     review: () => {
       const pts = turnPoints();
       const c = counts();
-      const other = game.lastTeam !== null && game.lastTeam >= 0 && game.lastTeam !== game.turn ? game.teams[game.lastTeam] : null;
+      const next = game.teams[(game.turn + 1) % game.teams.length];
+      const max = Math.max(1, game.target, ...game.teams.map(t => t.score + 1));
+      const gain = i => (i === game.turn ? pts : 0) + (game.lastTeam === i && i !== game.turn ? 1 : 0);
       return `
-      <div class="center stack"><div class="eyebrow">Итог хода · ${esc(game.teams[game.turn].name)}</div>
+      <div class="center stack"><div class="eyebrow">Ход окончен · ${esc(game.teams[game.turn].name)}</div>
         <div class="total ${pts >= 0 ? 'plus' : 'minus'}">${pts > 0 ? '+' : ''}${pts}</div>
-        <p class="muted small">Угадано ${c.hit} · пропусков ${c.skip}${game.mode === 'tabu' ? ` · нарушений ${c.foul}` : ''}<br>Нажмите на слово, чтобы исправить спорное</p></div>
+        <p class="muted small">Угадано ${c.hit} · пропусков ${c.skip}${game.mode === 'tabu' ? ` · нарушений ${c.foul}` : ''}${game.log.length ? '<br>Ошиблись? Нажмите на слово, чтобы исправить' : ''}</p></div>
       <div class="list">
         ${game.log.map((x, i) => `<button class="row" data-act="toggle" data-i="${i}"><span class="w">${esc(x.t)}</span><span class="mark ${MARKS[x.r][0]}">${MARKS[x.r][1]}</span></button>`).join('') || '<p class="muted center">Ни одного слова за ход</p>'}
-        ${game.lastTeam !== null && game.lastTeam >= 0 ? `<div class="row"><span class="w">Последнее слово: ${esc(game.word.t)}</span><span class="muted small">${esc(game.teams[game.lastTeam].name)} +1</span></div>` : ''}
       </div>
-      ${other ? `<p class="muted small center">${esc(other.name)} получает +1 за последнее слово</p>` : ''}
-      <div class="stack spacer"><button class="btn" data-act="apply">Записать очки</button></div>`;
+      ${game.lastWord && game.word ? `<div class="card stack">
+        <div class="eyebrow">Последнее слово: ${esc(game.word.t)}</div>
+        <p class="muted small" style="margin:0">Кто угадал после сигнала? Никто — ничего не нажимайте.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">${game.teams.map((t, i) => `<button class="btn ${game.lastTeam === i ? '' : 'alt'}" style="flex:1;min-width:40%" data-act="lastBy" data-i="${i}"><span class="dot" style="background:${t.color};margin-right:8px"></span>${esc(t.name)}${game.lastTeam === i ? ' +1' : ''}</button>`).join('')}</div>
+      </div>` : ''}
+      <div class="bars">${game.teams.map((t, i) => `
+        <div class="bar"><div class="lab"><span>${esc(t.name)}</span><b>${Math.max(0, t.score + gain(i))}${gain(i) ? ` <span class="muted small">(${gain(i) > 0 ? '+' : ''}${gain(i)})</span>` : ''}</b></div>
+          <div class="track"><div class="fill" style="width:${Math.round(Math.max(0, t.score + gain(i)) / max * 100)}%;background:${t.color}"></div></div></div>`).join('')}</div>
+      <div class="stack spacer"><button class="btn" data-act="apply">▶️ Дальше — ходит ${esc(next.name)}</button></div>`;
     },
 
     score: () => {
@@ -501,7 +503,7 @@
     hit: () => mark('hit'),
     skip: () => mark('skip'),
     foul: () => mark('foul'),
-    lastBy: el => { game.lastTeam = +el.dataset.i; go('review'); },
+    lastBy: el => { const i = +el.dataset.i; game.lastTeam = game.lastTeam === i ? null : i; save(); render(); },
     toggle: el => { const x = game.log[+el.dataset.i]; x.r = NEXT_MARK[game.mode][x.r] || 'hit'; save(); render(); },
     apply: applyTurn,
     next: () => go('ready'),
